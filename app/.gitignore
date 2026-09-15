@@ -1,0 +1,23 @@
+# machine-specific local GENCODE paths (see scripts/prebuild_index.py)
+backend/gencode_sources.json
+
+# python
+backend/.venv/
+backend/.cache/
+backend/.cache_test/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# node
+frontend/node_modules/
+frontend/dist/
+
+# tsc -b (composite project reference) emit for vite.config.ts
+frontend/vite.config.js
+frontend/vite.config.d.ts
+frontend/*.tsbuildinfo
+frontend/node_modules/.tmp/
+
+# os
+.DS_Store

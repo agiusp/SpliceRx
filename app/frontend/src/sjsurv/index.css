@@ -1,0 +1,189 @@
+/* SJSurv stylesheet, wrapped in a scope selector (native CSS nesting) so the
+   apps' identically-named classes (.app, .panel, .row, …) never collide. Shared
+   :root tokens / body / globals live in ../styles/base.css. */
+.sjsurv-scope {
+.app { max-width: 1200px; margin: 0 auto; padding: 20px; }
+
+.sub { color: var(--muted); margin: 0 0 18px; }
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 14px 16px;
+  margin-bottom: 14px;
+}
+
+.panel.disabled { opacity: 0.45; pointer-events: none; }
+
+.panel h2 {
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  margin: 0 0 10px;
+  display: flex;
+  align-items: center;
+}
+
+.step-num {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px; height: 20px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: #fff;
+  font-size: 12px;
+  margin-right: 8px;
+}
+
+.row { display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-end; }
+
+label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
+
+select, input[type="text"], input[type="number"], button {
+  font: inherit;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+}
+
+button { cursor: pointer; background: var(--accent); color: #fff; border-color: transparent; }
+button:disabled { opacity: 0.5; cursor: not-allowed; }
+button.ghost { background: transparent; color: var(--text); border-color: var(--border); }
+button.linklike {
+  background: none; border: none; padding: 0;
+  color: var(--accent); font: inherit; text-decoration: underline;
+}
+
+.radio-row { display: flex; flex-direction: column; gap: 8px; margin-bottom: 8px; }
+.radio-row label { flex-direction: row; align-items: flex-start; gap: 8px; color: var(--text); font-size: 13px; }
+.radio-row label.disabled { opacity: 0.5; }
+.radio-row .desc { color: var(--muted); font-size: 12px; display: block; }
+
+.tabs { display: flex; gap: 4px; margin-bottom: 12px; }
+.tabs button {
+  background: transparent;
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 6px 6px 0 0;
+  border-bottom: none;
+  padding: 6px 14px;
+}
+.tabs button.active {
+  color: var(--text);
+  background: var(--bg);
+  border-color: var(--border);
+  font-weight: 600;
+}
+
+/* Chrome (and others) render the browser-native <input type="file">'s own
+   "chosen file" text truncated in the middle once the control isn't wide, cut
+   short for anything but very short names — and there's no reliable way to
+   widen just that text. So we draw our own button and lay the real input on
+   top of it at zero opacity (not display:none / clip'd to 1px — that also
+   drops it from the accessibility tree, making it unreachable by keyboard and
+   screen readers), and show the picked name ourselves, in full and
+   immediately on selection, via the "✓ name" chip next to it. */
+.file-trigger { position: relative; display: inline-flex; width: fit-content; }
+.file-btn {
+  display: inline-flex;
+  align-items: center;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 12px;
+  pointer-events: none; /* the real input sits on top and gets the click */
+}
+.file-trigger:hover .file-btn { background: var(--panel); }
+.file-btn.disabled { opacity: 0.5; }
+.file-trigger input[type="file"] {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+.file-trigger input[type="file"]:disabled { cursor: not-allowed; }
+
+.suggest {
+  position: absolute;
+  z-index: 20;
+  top: 100%;
+  left: 0;
+  right: 0;
+  margin: 2px 0 0;
+  padding: 4px;
+  list-style: none;
+  max-height: 240px;
+  overflow-y: auto;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.25);
+}
+.suggest li { padding: 5px 8px; border-radius: 4px; cursor: pointer; font-size: 13px; }
+.suggest li.active { background: var(--accent); color: #fff; }
+
+.chip { display: inline-flex; gap: 6px; align-items: center; font-size: 12px; color: var(--muted); }
+.muted { color: var(--muted); }
+.mono { font-variant-numeric: tabular-nums; }
+
+.warn {
+  background: #fff4e0; border: 1px solid #f0c78a; color: #6b4a12;
+  border-radius: 6px; padding: 8px 10px; font-size: 13px; margin-top: 8px;
+}
+.err {
+  background: #fdeceb; border: 1px solid #e6a6a2; color: #7a241f;
+  border-radius: 6px; padding: 8px 10px; font-size: 13px; margin-top: 8px;
+}
+@media (prefers-color-scheme: dark) {
+  .warn { background: #3a2f18; border-color: #6b552a; color: #f0d9a8; }
+  .err { background: #3a201e; border-color: #6e3833; color: #f2b7b2; }
+}
+
+table.grid { width: 100%; border-collapse: collapse; font-size: 13px; }
+table.grid th, table.grid td { padding: 5px 8px; text-align: left; border-top: 1px solid var(--border); }
+table.grid thead th { border-top: none; color: var(--muted); font-weight: 600; }
+table.grid td.num, table.grid th.num { text-align: right; font-variant-numeric: tabular-nums; }
+table.grid tr.sel td { background: color-mix(in srgb, var(--accent) 14%, transparent); }
+.scroll-x { overflow-x: auto; }
+.tbl-scroll { max-height: 340px; overflow-y: auto; }
+
+.log {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-size: 12px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  white-space: pre-wrap;
+  margin-top: 8px;
+}
+
+.statgrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 10px;
+  margin: 10px 0;
+}
+.statgrid .stat {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+}
+.statgrid .stat .k { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.03em; }
+.statgrid .stat .v { font-size: 18px; font-variant-numeric: tabular-nums; }
+
+.confusion { border-collapse: collapse; font-size: 12px; margin-top: 6px; }
+.confusion td, .confusion th { border: 1px solid var(--border); padding: 4px 10px; text-align: center; }
+.confusion th { color: var(--muted); font-weight: 600; }
+}

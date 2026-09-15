@@ -1,0 +1,199 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>SJ Web Apps</title>
+<meta name="description" content="Interactive tools for exploring splice-junction data from TCGA cohorts: sashimi plots, cohort heatmaps, survival-group classification, and junction lookup." />
+<style>
+  :root {
+    --bg: #faf9f7;
+    --bg-panel: #ffffff;
+    --border: #e4e0d8;
+    --text: #262220;
+    --text-muted: #6b6560;
+    --accent: #a6432f;
+    --accent-soft: #f3e3de;
+    --code-bg: #f1efe9;
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #1b1917;
+      --bg-panel: #24211f;
+      --border: #38332e;
+      --text: #ece7e0;
+      --text-muted: #a89f95;
+      --accent: #e08064;
+      --accent-soft: #3a2620;
+      --code-bg: #2a2622;
+      color-scheme: dark;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    line-height: 1.55;
+  }
+  .wrap { max-width: 780px; margin: 0 auto; padding: 4rem 1.5rem 5rem; }
+  header { margin-bottom: 2.5rem; }
+  .eyebrow {
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: var(--accent);
+    margin: 0 0 0.75rem;
+  }
+  h1 { font-size: 2.3rem; margin: 0 0 0.6rem; letter-spacing: -0.01em; }
+  .tagline { font-size: 1.1rem; color: var(--text-muted); margin: 0 0 1.75rem; max-width: 60ch; }
+  .cta { display: flex; gap: 0.75rem; flex-wrap: wrap; }
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.6rem 1.1rem;
+    border-radius: 8px;
+    font-size: 0.95rem;
+    font-weight: 600;
+    text-decoration: none;
+    border: 1px solid var(--border);
+  }
+  .btn-primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .btn-secondary { background: var(--bg-panel); color: var(--text); }
+  h2 { font-size: 1.3rem; margin: 3rem 0 1rem; }
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 1rem;
+  }
+  .card {
+    background: var(--bg-panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 1.1rem 1.2rem;
+  }
+  .card h3 { margin: 0 0 0.4rem; font-size: 1rem; }
+  .card p { margin: 0; font-size: 0.9rem; color: var(--text-muted); }
+  .tag {
+    display: inline-block;
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.03em;
+    color: var(--accent);
+    background: var(--accent-soft);
+    border-radius: 5px;
+    padding: 0.1rem 0.45rem;
+    margin-bottom: 0.5rem;
+  }
+  .note {
+    background: var(--bg-panel);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--accent);
+    border-radius: 0 8px 8px 0;
+    padding: 1rem 1.2rem;
+    font-size: 0.92rem;
+    color: var(--text-muted);
+  }
+  .note strong { color: var(--text); }
+  code {
+    background: var(--code-bg);
+    border-radius: 4px;
+    padding: 0.1rem 0.35rem;
+    font-size: 0.88em;
+  }
+  pre {
+    background: var(--code-bg);
+    border-radius: 8px;
+    padding: 1rem 1.2rem;
+    overflow-x: auto;
+    font-size: 0.85rem;
+  }
+  pre code { background: none; padding: 0; }
+  footer {
+    margin-top: 3.5rem;
+    padding-top: 1.5rem;
+    border-top: 1px solid var(--border);
+    font-size: 0.85rem;
+    color: var(--text-muted);
+  }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <p class="eyebrow">TCGA splice-junction analysis</p>
+    <h1>SJ Web Apps</h1>
+    <p class="tagline">
+      Interactive tools for exploring splice-junction data prepared with the
+      <code>prepTCGAdata</code> R package — sashimi plots, cohort-level
+      heatmaps, survival-group classification, and junction lookup, all in
+      one app you run on your own machine.
+    </p>
+    <div class="cta">
+      <a class="btn btn-primary" href="https://github.com/GITHUB-USERNAME/sj_webapps">View on GitHub</a>
+      <a class="btn btn-secondary" href="https://github.com/GITHUB-USERNAME/sj_webapps#running-it-locally">Run it locally</a>
+    </div>
+  </header>
+
+  <div class="note">
+    <strong>This is a local-first research tool, not a hosted service.</strong>
+    The app reads TCGA cohort files straight off the filesystem of the machine
+    it runs on, so it works against your own prepared cohorts. Clone the repo
+    and start it locally — it's a two-command setup, see below.
+  </div>
+
+  <h2>What's inside</h2>
+  <div class="grid">
+    <div class="card">
+      <span class="tag">DATA</span>
+      <h3>Data</h3>
+      <p>Point the app at a local directory of prepared TCGA cohort files — the one way any tab gets data in.</p>
+    </div>
+    <div class="card">
+      <span class="tag">SJV</span>
+      <h3>Sashimi plot</h3>
+      <p>SCANVIS-style sashimi plot of splice-junction coverage for one sample or a sample group.</p>
+    </div>
+    <div class="card">
+      <span class="tag">SJVC</span>
+      <h3>NSJCG</h3>
+      <p>Cohort-level heatmap, PCA and UMAP of novel-splice-junction-per-gene counts, with clinical variables layered on.</p>
+    </div>
+    <div class="card">
+      <span class="tag">SJSurv</span>
+      <h3>Survival groups</h3>
+      <p>Cross-validated logistic regression classifying a Good / Poor survival label from a splice-junction feature matrix.</p>
+    </div>
+    <div class="card">
+      <span class="tag">LOOKUP</span>
+      <h3>SJ Lookup</h3>
+      <p>Direct per-junction lookup against junction metadata.</p>
+    </div>
+  </div>
+
+  <h2>Quick start</h2>
+  <pre><code>git clone https://github.com/GITHUB-USERNAME/sj_webapps.git
+cd sj_webapps/app/backend
+python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+.venv/bin/python -m uvicorn main:app --port 8000 --reload
+
+# in a second terminal
+cd sj_webapps/app/frontend
+npm install && npm run dev   # open http://localhost:5173</code></pre>
+  <p>
+    See the <a href="https://github.com/GITHUB-USERNAME/sj_webapps#readme">full README</a>
+    for prerequisites, pointing the app at your own cohort data, and running
+    the test suite.
+  </p>
+
+  <footer>
+    Built on <a href="https://github.com/GITHUB-USERNAME/sj_webapps">github.com/GITHUB-USERNAME/sj_webapps</a>.
+  </footer>
+</div>
+</body>
+</html>

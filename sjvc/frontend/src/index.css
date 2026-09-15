@@ -1,0 +1,448 @@
+:root {
+  color-scheme: light dark;
+  --bg: #ffffff;
+  --panel: #f7f7f5;
+  --border: #d9d8d2;
+  --text: #1a1a19;
+  --muted: #6b6a65;
+  --accent: #2a78d6;
+  --track-blue: #2f5c9e;
+  --track-blue-utr: #9fb6d6;
+  --surface: #fcfcfb;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #131312;
+    --panel: #1e1e1c;
+    --border: #33322f;
+    --text: #f2f2ee;
+    --muted: #9c9a92;
+    --accent: #3987e5;
+    --track-blue: #7ea6e0;
+    --track-blue-utr: #3f5f8c;
+    --surface: #1a1a19;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+  background: var(--bg);
+  color: var(--text);
+}
+
+h1 {
+  font-size: 18px;
+  margin: 0 0 2px;
+}
+
+.app {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 20px;
+}
+
+.sub {
+  color: var(--muted);
+  margin: 0 0 18px;
+}
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 14px 16px;
+  margin-bottom: 14px;
+}
+
+.panel h2 {
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  margin: 0 0 10px;
+}
+
+.row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: flex-end;
+}
+
+label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+select,
+input[type="text"],
+button {
+  font: inherit;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+}
+
+button {
+  cursor: pointer;
+  background: var(--accent);
+  color: #fff;
+  border-color: transparent;
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+button.ghost {
+  background: transparent;
+  color: var(--text);
+  border-color: var(--border);
+}
+
+button.linklike {
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--accent);
+  font: inherit;
+  text-decoration: underline;
+}
+
+/* Chrome (and others) render the browser-native <input type="file">'s own
+   "chosen file" text truncated in the middle once the control isn't wide, cut
+   short for anything but very short names — and there's no reliable way to
+   widen just that text. So we draw our own button and lay the real input on
+   top of it at zero opacity (not display:none / clip'd to 1px — that also
+   drops it from the accessibility tree, making it unreachable by keyboard and
+   screen readers), and show the picked name ourselves, in full and
+   immediately on selection, via the "✓ name" chip next to it. */
+.file-trigger {
+  position: relative;
+  display: inline-flex;
+  width: fit-content;
+}
+
+.file-btn {
+  display: inline-flex;
+  align-items: center;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 12px;
+  pointer-events: none; /* the real input sits on top and gets the click */
+}
+
+.file-trigger:hover .file-btn {
+  background: var(--panel);
+}
+
+.file-btn.disabled {
+  opacity: 0.5;
+}
+
+.file-trigger input[type="file"] {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.file-trigger input[type="file"]:disabled {
+  cursor: not-allowed;
+}
+
+.warn {
+  background: #fff4e0;
+  border: 1px solid #f0c78a;
+  color: #6b4a12;
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-size: 13px;
+  margin-top: 8px;
+}
+
+@media (prefers-color-scheme: dark) {
+  .warn {
+    background: #3a2f18;
+    border-color: #6b552a;
+    color: #f0d9a8;
+  }
+}
+
+.err {
+  background: #fdeceb;
+  border: 1px solid #e6a6a2;
+  color: #7a241f;
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-size: 13px;
+  margin-top: 8px;
+}
+
+@media (prefers-color-scheme: dark) {
+  .err {
+    background: #3a201e;
+    border-color: #6e3833;
+    color: #f2b7b2;
+  }
+}
+
+.plot-wrap {
+  overflow-x: auto;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  padding: 10px 4px 2px;
+  font-size: 12px;
+}
+
+.legend .item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.legend .swatch {
+  width: 18px;
+  height: 4px;
+  border-radius: 2px;
+}
+
+.tooltip {
+  position: fixed;
+  pointer-events: none;
+  background: var(--text);
+  color: var(--bg);
+  font-size: 12px;
+  padding: 5px 8px;
+  border-radius: 5px;
+  white-space: nowrap;
+  z-index: 10;
+}
+
+.muted {
+  color: var(--muted);
+}
+
+.toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  margin: 10px 0;
+}
+
+.chip {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.suggest {
+  position: absolute;
+  z-index: 20;
+  top: 100%;
+  left: 0;
+  right: 0;
+  margin: 2px 0 0;
+  padding: 4px;
+  list-style: none;
+  max-height: 240px;
+  overflow-y: auto;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.25);
+}
+
+.suggest li {
+  padding: 5px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.suggest li.active {
+  background: var(--accent);
+  color: #fff;
+}
+
+.radio-row {
+  display: flex;
+  gap: 16px;
+  margin-bottom: 10px;
+}
+
+.radio-row label {
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+  color: var(--text);
+  font-size: 13px;
+}
+
+/* --- SJVC --- */
+.panel.disabled {
+  opacity: 0.45;
+  pointer-events: none;
+}
+
+.step-num {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: #fff;
+  font-size: 12px;
+  margin-right: 8px;
+}
+
+.tabs {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 12px;
+}
+
+.tabs button {
+  background: transparent;
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 6px 6px 0 0;
+  border-bottom: none;
+  padding: 6px 14px;
+}
+
+.tabs button.active {
+  color: var(--text);
+  background: var(--bg);
+  border-color: var(--border);
+  font-weight: 600;
+}
+
+.feat-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px 3px 10px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  font-size: 12px;
+  background: var(--bg);
+}
+
+.feat-chip .type {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  padding: 1px 5px;
+  border-radius: 8px;
+  cursor: pointer;
+  background: var(--panel);
+  border: 1px solid var(--border);
+}
+
+.feat-chip .x {
+  cursor: pointer;
+  color: var(--muted);
+  font-weight: 700;
+}
+
+.pill-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 6px 0;
+}
+
+.pill {
+  font-size: 12px;
+  padding: 3px 9px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  cursor: pointer;
+  background: var(--bg);
+  color: var(--text);
+}
+
+.pill.on {
+  background: var(--accent);
+  color: #fff;
+  border-color: transparent;
+}
+
+.plot-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px;
+  overflow-x: auto;
+}
+
+.legend-block {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  align-items: flex-start;
+  font-size: 12px;
+  margin-bottom: 8px;
+}
+
+.legend-block .grp {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.legend-block .grp .ttl {
+  color: var(--muted);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.legend-block .item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.legend-block .sw {
+  width: 12px;
+  height: 12px;
+  border-radius: 3px;
+  flex: none;
+}
+
+.mono {
+  font-variant-numeric: tabular-nums;
+}
+

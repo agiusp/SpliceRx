@@ -1,0 +1,26 @@
+##description: SJV test fixture — synthetic gene TESTG1 on chr1 (+ strand)
+##format: gtf
+chr1	SJV	gene	1000	5200	.	+	.	gene_id "TESTG1"; gene_name "TESTG1";
+chr1	SJV	transcript	1000	3200	.	+	.	gene_id "TESTG1"; transcript_id "TESTG1.1"; gene_name "TESTG1";
+chr1	SJV	exon	1000	1200	.	+	.	gene_id "TESTG1"; transcript_id "TESTG1.1"; exon_number 1;
+chr1	SJV	exon	2000	2200	.	+	.	gene_id "TESTG1"; transcript_id "TESTG1.1"; exon_number 2;
+chr1	SJV	exon	3000	3200	.	+	.	gene_id "TESTG1"; transcript_id "TESTG1.1"; exon_number 3;
+chr1	SJV	CDS	2050	2200	.	+	0	gene_id "TESTG1"; transcript_id "TESTG1.1";
+chr1	SJV	CDS	3000	3200	.	+	0	gene_id "TESTG1"; transcript_id "TESTG1.1";
+chr1	SJV	transcript	2000	4200	.	+	.	gene_id "TESTG1"; transcript_id "TESTG1.2"; gene_name "TESTG1";
+chr1	SJV	exon	2000	2200	.	+	.	gene_id "TESTG1"; transcript_id "TESTG1.2"; exon_number 1;
+chr1	SJV	exon	3000	3200	.	+	.	gene_id "TESTG1"; transcript_id "TESTG1.2"; exon_number 2;
+chr1	SJV	exon	4000	4200	.	+	.	gene_id "TESTG1"; transcript_id "TESTG1.2"; exon_number 3;
+chr1	SJV	CDS	2050	2200	.	+	0	gene_id "TESTG1"; transcript_id "TESTG1.2";
+chr1	SJV	CDS	3000	3200	.	+	0	gene_id "TESTG1"; transcript_id "TESTG1.2";
+chr1	SJV	CDS	4000	4100	.	+	0	gene_id "TESTG1"; transcript_id "TESTG1.2";
+chr1	SJV	transcript	3000	5200	.	+	.	gene_id "TESTG1"; transcript_id "TESTG1.3"; gene_name "TESTG1";
+chr1	SJV	exon	3000	3200	.	+	.	gene_id "TESTG1"; transcript_id "TESTG1.3"; exon_number 1;
+chr1	SJV	exon	4000	4200	.	+	.	gene_id "TESTG1"; transcript_id "TESTG1.3"; exon_number 2;
+chr1	SJV	exon	5000	5200	.	+	.	gene_id "TESTG1"; transcript_id "TESTG1.3"; exon_number 3;
+chr1	SJV	CDS	3000	3200	.	+	0	gene_id "TESTG1"; transcript_id "TESTG1.3";
+chr1	SJV	CDS	4000	4100	.	+	0	gene_id "TESTG1"; transcript_id "TESTG1.3";
+chr1	SJV	gene	1000	2000	.	+	.	gene_id "OTHERG"; gene_name "OTHERG";
+chr1	SJV	transcript	1000	2000	.	+	.	gene_id "OTHERG"; transcript_id "OTHERG.1"; gene_name "OTHERG";
+chr1	SJV	exon	1000	1400	.	+	.	gene_id "OTHERG"; transcript_id "OTHERG.1"; exon_number 1;
+chr1	SJV	exon	1700	2000	.	+	.	gene_id "OTHERG"; transcript_id "OTHERG.1"; exon_number 2;

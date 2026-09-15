@@ -1,0 +1,13 @@
+sample_id,subtype,stage,age,tmb,response,notes
+s01,LUAD,1,52,18.84,CR,case-s01-note
+s02,LUAD,2,61,19.38,PR,case-s02-note
+s03,LUAD,3,47,3.04,SD,case-s03-note
+s04,LUAD,1,70,8.35,PD,case-s04-note
+s05,LUAD,2,66,17.44,CR,case-s05-note
+s06,LUAD,3,58,8.49,PR,case-s06-note
+s07,LUSC,1,73,16.91,SD,case-s07-note
+s08,LUSC,2,49,1.99,PD,case-s08-note
+s09,LUSC,3,64,12.77,CR,case-s09-note
+s10,LUSC,1,55,11.04,PR,case-s10-note
+s11,LUSC,2,78,2.14,SD,case-s11-note
+s12,LUSC,3,45,3.49,PD,case-s12-note

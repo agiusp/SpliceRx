@@ -1,0 +1,496 @@
+"""Cohort stratification for SJSurv.
+
+`prepTCGAdata::get_tcga_data()` writes the *raw* sample metadata — histology,
+pathologic stage, age at diagnosis, overall survival — but no longer bakes a
+Good/Poor survivor label into it (that used to be `surv_cohort()`, an R
+function baked into the package). Stratifying the cohort now happens here,
+interactively, so the age bands can be tuned to the cohort at hand instead of
+being fixed at download time:
+
+1. ``parse_raw_metadata`` reads the raw table (rows = samples, keyed by
+   `sample_id`, matched against the sjdat matrix's columns). Age and overall
+   survival aren't always under the same column name across cohorts/downloads
+   — the most complete candidate present is used for each (see
+   ``_most_complete_col``); if no pre-computed survival-time column exists at
+   all, it's built from days-to-death (deceased) / days-to-last-follow-up
+   (censored) instead.
+2. ``stratify`` derives, for a chosen set of age bands and a minimum group
+   size, exactly what `surv_cohort()` used to:
+
+   * ``Histology``       — copy of the histological-diagnosis column, with
+     any user-chosen merges applied (see `histology_map`), or dropped from
+     `Group` entirely (`use_histology=False`) — some cohorts are
+     heterogeneous enough that splitting on histology leaves cohorts too
+     small to label.
+   * ``Stage``            — `"Early"` (I/II) / `"Late"` (III/IV) / `None`.
+   * ``Age_at_diagnosis`` — the age, binned (see `AgeBands` below).
+   * ``Group``            — `"Histology | Stage | Age_at_diagnosis"` (or just
+     `"Stage | Age_at_diagnosis"` with histology dropped), or `None` when any
+     remaining component is `None`.
+   * ``MedianSurvival``   — for every `Group` with at least `min_group_n`
+     samples, the median `survival_days` over that group.
+   * ``SurviverGroup``    — `"Good"` when a sample's own survival is at least
+     its group's `MedianSurvival`, `"Poor"` otherwise, `None` where the group
+     has no `MedianSurvival`.
+
+`AgeBands` defaults to the classic fixed cut points `(30-50], (50-70], (>70)`
+(ages of 30 or under are left unbanded — i.e. excluded from `Group`, exactly as
+`surv_cohort()` did). `quantile_age_bands` offers a data-driven alternative:
+equal-count bands computed from the cohort's own age distribution, which often
+balances group sizes better than fixed cut points on a small or skewed cohort.
+"""
+from __future__ import annotations
+
+import math
+import re
+from collections import Counter
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Dict, List, Optional, Sequence, Tuple
+
+import numpy as np
+import pandas as pd
+
+from sjvc.services.rds import MatrixError, read_table
+
+# Checked in this order — a real sample_id-named column always wins. "rownames"
+# is last: pyreadr names a data.frame's own (non-default) R row names that way
+# when it reads one — recount3/TCGA sample-metadata tables commonly carry the
+# sample UUID only as row names, with no separate sample_id column at all.
+_SAMPLE_ID_ALIASES = ("sample_id", "sampleid", "sample id", "sample.id", "rownames")
+# Exact prepTCGAdata::get_tcga_data() raw column names first, with only a
+# couple of low-risk synonyms as fallback. Deliberately *not* aliased:
+# "histology", "stage", "age_at_diagnosis" — those are exactly the *derived*
+# column names the old, now-removed R-side surv_cohort() used to write into
+# this same file. A cohort downloaded before that removal can still carry
+# them (already binned / stringy, e.g. Age_at_diagnosis = "(50-70]"); matching
+# them here would silently stratify on stale output instead of the raw data.
+_HIST_ALIASES = ("tcga.cgc_case_histological_diagnosis", "histological_diagnosis")
+_STAGE_ALIASES = ("tcga.cgc_case_pathologic_stage", "pathologic_stage")
+# Age in *years* — which of these a cohort actually has (and how complete it
+# is) varies: some downloads only get the harmonized prepTCGAdata column,
+# others only the raw TCGA fields (also years, unlike GDC's days-based
+# age_at_diagnosis — deliberately not aliased here to avoid silently reading
+# days as years). The most complete one present is used, not just the first
+# — see _most_complete_col().
+_AGE_ALIASES = (
+    "age_at_diagnosis_years",
+    "tcga.cgc_case_age_at_diagnosis",
+    "tcga.xml_age_at_initial_pathologic_diagnosis",
+)
+_OS_ALIASES = ("survival_days", "os_days", "survival_time")
+# Fallback when a cohort has no pre-computed survival-time column at all: the
+# standard TCGA construction is days-to-death for the deceased, days-to-last-
+# follow-up for everyone else (censored/alive). Each half is picked by
+# _most_complete_col() too, since — like age — the raw field name varies by
+# cohort/download. Deliberately narrow (exact field names only, not a broad
+# "days_to_*" pattern): several other TCGA "days_to_*" fields exist
+# (days_to_birth, days_to_collection, days_to_initial_pathologic_diagnosis,
+# …) that measure something other than time-from-diagnosis-to-event, and
+# must never be swept in here.
+_DAYS_TO_DEATH_ALIASES = (
+    "days_to_death",
+    "tcga.cgc_case_days_to_death",
+    "tcga.gdc_cases.diagnoses.days_to_death",
+    "tcga.cgc_follow_up_days_to_death",
+    "tcga.xml_days_to_death",
+)
+_DAYS_TO_LAST_FOLLOWUP_ALIASES = (
+    "days_to_last_follow_up",
+    "tcga.cgc_case_days_to_last_follow_up",
+    "tcga.gdc_cases.diagnoses.days_to_last_follow_up",
+    "tcga.cgc_follow_up_days_to_last_follow_up",
+    "tcga.xml_days_to_last_followup",
+    "tcga.xml_days_to_last_known_alive",
+)
+_LEGACY_DERIVED_COLS = {"histology", "stage", "age_at_diagnosis", "group", "survivergroup", "mediansurvival"}
+_MISSING = {"", "nan", "none", "na", "n/a", "null"}
+_ABC_SUFFIX = re.compile(r"[abcd][0-9]?$")
+
+
+class MetadataError(ValueError):
+    pass
+
+
+class StratifyError(ValueError):
+    pass
+
+
+def _is_missing(v: object) -> bool:
+    return v is None or str(v).strip().lower() in _MISSING
+
+
+def _to_float(v: object) -> Optional[float]:
+    if _is_missing(v):
+        return None
+    try:
+        return float(str(v).strip())
+    except ValueError:
+        return None
+
+
+# --------------------------------------------------------------------------- #
+# raw sample metadata
+# --------------------------------------------------------------------------- #
+@dataclass
+class RawMetadata:
+    # sample_id -> {"histology": str|None, "stage_raw": str|None,
+    #               "age": float|None, "os": float|None}
+    rows: Dict[str, Dict[str, object]]
+    n_unmatched: int = 0
+
+    @property
+    def n_rows(self) -> int:
+        return len(self.rows)
+
+    def ages(self) -> List[Optional[float]]:
+        return [r["age"] for r in self.rows.values()]
+
+    def age_summary(self) -> Dict[str, object]:
+        finite = [a for a in self.ages() if a is not None and math.isfinite(a)]
+        return {
+            "n_with_age": len(finite),
+            "age_min": float(min(finite)) if finite else None,
+            "age_max": float(max(finite)) if finite else None,
+        }
+
+    def histology_counts(self) -> List[Tuple[str, int]]:
+        """Distinct raw histology values and how many samples carry each,
+        most-common first — what the merge-editor shows the user so they can
+        decide which values to fold together (or drop histology entirely; see
+        stratify()'s `use_histology`)."""
+        c = Counter(r["histology"] for r in self.rows.values() if r["histology"] is not None)
+        return sorted(c.items(), key=lambda kv: (-kv[1], kv[0]))
+
+
+def _find_col(cols: Dict[str, str], aliases: Sequence[str]) -> Optional[str]:
+    """First alias (checked in order — the canonical name goes first) that is
+    both present and not one of the old surv_cohort()-derived column names."""
+    return next(
+        (cols[a] for a in aliases if a in cols and a not in _LEGACY_DERIVED_COLS), None
+    )
+
+
+def _most_complete_col(df: pd.DataFrame, cols: Dict[str, str], aliases: Sequence[str]) -> Optional[str]:
+    """Among the given aliases that are present, the one with the most usable
+    (non-missing, numeric) values — unlike _find_col, not just the first one
+    present. Different TCGA cohort downloads expose different subsets of the
+    equivalent fields, and a present column isn't necessarily a populated
+    one."""
+    present = [cols[a] for a in aliases if a in cols and a not in _LEGACY_DERIVED_COLS]
+    if not present:
+        return None
+    if len(present) == 1:
+        return present[0]
+    return max(present, key=lambda c: sum(1 for v in df[c] if _to_float(v) is not None))
+
+
+def parse_raw_metadata(path: Path, tmp_dir: Path, known_samples: Sequence[str]) -> RawMetadata:
+    try:
+        df = read_table(path, tmp_dir)
+    except MatrixError as e:
+        raise MetadataError(str(e))
+    cols = {str(c).strip().lower(): str(c) for c in df.columns}
+
+    id_col = _find_col(cols, _SAMPLE_ID_ALIASES)
+    if id_col is None:
+        raise MetadataError(
+            "no `sample_id` column found in the sample metadata; columns: "
+            + ", ".join(map(str, df.columns))
+        )
+    hist_col = _find_col(cols, _HIST_ALIASES)
+    stage_col = _find_col(cols, _STAGE_ALIASES)
+    age_col = _most_complete_col(df, cols, _AGE_ALIASES)
+    os_col = _find_col(cols, _OS_ALIASES)
+    death_col = fu_col = None
+    if os_col is None:
+        # no pre-computed survival-time column — build one from the raw
+        # days-to-death / days-to-last-follow-up fields instead (see the
+        # alias comment above for why these two are picked separately)
+        death_col = _most_complete_col(df, cols, _DAYS_TO_DEATH_ALIASES)
+        fu_col = _most_complete_col(df, cols, _DAYS_TO_LAST_FOLLOWUP_ALIASES)
+
+    missing = [
+        label for label, c in (
+            ("histological diagnosis (tcga.cgc_case_histological_diagnosis)", hist_col),
+            ("pathologic stage (tcga.cgc_case_pathologic_stage)", stage_col),
+            ("age at diagnosis (" + " / ".join(_AGE_ALIASES) + ")", age_col),
+        ) if c is None
+    ]
+    if os_col is None and death_col is None and fu_col is None:
+        missing.append(
+            "overall survival (survival_days, or days_to_death / days_to_last_follow_up)"
+        )
+    if missing:
+        raise MetadataError(
+            "the sample metadata is missing column(s) needed to stratify the cohort: "
+            + "; ".join(missing)
+            + ". This should be the TCGA_<cohort>_sample_metadata.rds file written by "
+              "prepTCGAdata::get_tcga_data()."
+        )
+
+    def _os_value(r: pd.Series) -> Optional[float]:
+        if os_col is not None:
+            return _to_float(r[os_col])
+        # standard TCGA construction: time-to-death for the deceased,
+        # time-to-last-follow-up (censored) for everyone else
+        v = _to_float(r[death_col]) if death_col is not None else None
+        if v is None and fu_col is not None:
+            v = _to_float(r[fu_col])
+        return v
+
+    known = {str(s) for s in known_samples}
+    filter_to_known = bool(known)   # no sjdat loaded yet -> keep every row
+    rows: Dict[str, Dict[str, object]] = {}
+    n_unmatched = 0
+    for _, r in df.iterrows():
+        sid = str(r[id_col]).strip()
+        if _is_missing(sid):
+            continue
+        if filter_to_known and sid not in known:
+            n_unmatched += 1
+            continue
+        rows[sid] = {
+            "histology": None if _is_missing(r[hist_col]) else str(r[hist_col]).strip(),
+            "stage_raw": None if _is_missing(r[stage_col]) else str(r[stage_col]).strip(),
+            "age": _to_float(r[age_col]),
+            "os": _os_value(r),
+        }
+
+    if not rows:
+        raise MetadataError(
+            "no `sample_id` in the metadata matched a column of the sjdat matrix"
+        )
+    return RawMetadata(rows=rows, n_unmatched=n_unmatched)
+
+
+# --------------------------------------------------------------------------- #
+# Stage: I/II -> Early, III/IV -> Late (same rule as the old surv_cohort())
+# --------------------------------------------------------------------------- #
+def stage_label(raw: Optional[str]) -> Optional[str]:
+    if raw is None:
+        return None
+    st = str(raw).strip().lower()
+    if not st:
+        return None
+    st = re.sub(r"^stage\s+", "", st)          # "stage iia" -> "iia"
+    st = _ABC_SUFFIX.sub("", st)                # "iia" -> "ii", "iv" unchanged
+    if st in ("i", "ii"):
+        return "Early"
+    if st in ("iii", "iv"):
+        return "Late"
+    return None
+
+
+# --------------------------------------------------------------------------- #
+# Age_at_diagnosis bands
+# --------------------------------------------------------------------------- #
+def _fmt_edge(x: float) -> str:
+    if math.isinf(x):
+        return "∞"
+    return f"{x:g}"
+
+
+def _make_labels(edges: List[float], include_lowest: bool) -> List[str]:
+    labels = []
+    for i in range(len(edges) - 1):
+        lo, hi = edges[i], edges[i + 1]
+        if math.isinf(hi):
+            labels.append(f"(>{_fmt_edge(lo)})")
+        elif i == 0 and include_lowest:
+            labels.append(f"[{_fmt_edge(lo)}-{_fmt_edge(hi)}]")
+        else:
+            labels.append(f"({_fmt_edge(lo)}-{_fmt_edge(hi)}]")
+    return labels
+
+
+@dataclass
+class AgeBands:
+    edges: List[float]                    # ascending, length n_bands + 1; last may be inf
+    include_lowest: bool = False          # left-inclusive first band (True for quantile bands)
+    labels: List[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if len(self.edges) < 2:
+            raise StratifyError("age bands need at least 2 edges (1 band)")
+        if any(b <= a for a, b in zip(self.edges, self.edges[1:])):
+            raise StratifyError("age-band edges must be strictly increasing")
+        if not self.labels:
+            self.labels = _make_labels(self.edges, self.include_lowest)
+
+    @property
+    def n_bands(self) -> int:
+        return len(self.edges) - 1
+
+
+# The default, exactly as `surv_cohort()` had it: (30-50], (50-70], (>70) —
+# ages of 30 or under fall below the first edge and are left unbanded (None).
+CLASSIC_AGE_BANDS = AgeBands(edges=[30.0, 50.0, 70.0, math.inf], include_lowest=False)
+DEFAULT_MIN_GROUP_N = 20
+
+
+def quantile_age_bands(ages: Sequence[Optional[float]], n_bands: int) -> AgeBands:
+    """A data-driven alternative to the classic fixed cut points: `n_bands`
+    equal-count bands spanning this cohort's own age distribution (nothing is
+    left unbanded). Useful when the fixed 30/50/70 cut points fragment a small
+    or unusually-distributed cohort into groups too small to label."""
+    if n_bands < 1:
+        raise StratifyError("the number of age bands must be >= 1")
+    finite = sorted(a for a in ages if a is not None and math.isfinite(a))
+    if len(finite) < max(n_bands, 4):
+        raise StratifyError(
+            f"only {len(finite)} sample(s) have a usable age — too few to compute "
+            f"{n_bands} band(s)"
+        )
+    qs = np.quantile(finite, np.linspace(0, 1, n_bands + 1))
+    # Round the outer edges outward (floor the min, ceil the max) rather than to
+    # the nearest 0.1 — rounding the true max *down* would strand the cohort's
+    # oldest sample(s) above the last edge and leave them unbanded, defeating
+    # the point of a "covers everyone" alternative to the fixed cut points.
+    edges = [math.floor(float(qs[0]) * 10) / 10]
+    last = len(qs) - 1
+    for i, q in enumerate(qs[1:], start=1):
+        v = math.ceil(float(q) * 10) / 10 if i == last else round(float(q), 1)
+        if v <= edges[-1]:            # ties (many equal ages) -> keep strictly increasing
+            v = round(edges[-1] + 0.1, 1)
+        edges.append(v)
+    return AgeBands(edges=edges, include_lowest=True)
+
+
+def bin_ages(ages: Sequence[Optional[float]], bands: AgeBands) -> List[Optional[str]]:
+    s = pd.Series([np.nan if a is None else a for a in ages], dtype=float)
+    cats = pd.cut(s, bins=bands.edges, right=True, include_lowest=bands.include_lowest,
+                   labels=bands.labels)
+    return [None if pd.isna(v) else str(v) for v in cats]
+
+
+# --------------------------------------------------------------------------- #
+# stratified output (what the rest of SJSurv consumes)
+# --------------------------------------------------------------------------- #
+ALL_GROUPS = "__all__"
+ALL_GROUPS_LABEL = "All labelled samples (any Group)"
+NO_GROUP = "(no Group)"
+
+
+@dataclass
+class GroupCount:
+    group: str
+    n_total: int
+    n_good: int
+    n_poor: int
+    n_labelled: int
+
+
+@dataclass
+class Metadata:
+    # sample_id -> {"group": str|None, "surviver": "Good"|"Poor"|None}
+    rows: Dict[str, Dict[str, object]]
+    n_unmatched: int = 0
+
+    @property
+    def n_rows(self) -> int:
+        return len(self.rows)
+
+    def group_counts(self) -> List[GroupCount]:
+        buckets: Dict[str, List[int]] = {}
+        for r in self.rows.values():
+            g = r["group"] or NO_GROUP
+            b = buckets.setdefault(g, [0, 0, 0])
+            b[0] += 1
+            if r["surviver"] == "Good":
+                b[1] += 1
+            elif r["surviver"] == "Poor":
+                b[2] += 1
+
+        no_group = buckets.pop(NO_GROUP, None)
+        ordered = sorted(buckets.items(), key=lambda kv: (-sum(kv[1][1:]), kv[0]))
+        out = [
+            GroupCount(group=g, n_total=b[0], n_good=b[1], n_poor=b[2], n_labelled=b[1] + b[2])
+            for g, b in ordered
+        ]
+        if no_group is not None:
+            out.append(GroupCount(
+                group=NO_GROUP, n_total=no_group[0], n_good=no_group[1],
+                n_poor=no_group[2], n_labelled=no_group[1] + no_group[2],
+            ))
+
+        good = sum(gc.n_good for gc in out)
+        poor = sum(gc.n_poor for gc in out)
+        out.insert(0, GroupCount(
+            group=ALL_GROUPS, n_total=sum(gc.n_total for gc in out),
+            n_good=good, n_poor=poor, n_labelled=good + poor,
+        ))
+        return out
+
+    def labelled_samples(self, group: str) -> Dict[str, str]:
+        """``sample_id -> "Good"|"Poor"`` for the chosen group (or every
+        labelled sample when ``group == ALL_GROUPS``)."""
+        out: Dict[str, str] = {}
+        for sid, r in self.rows.items():
+            if r["surviver"] not in ("Good", "Poor"):
+                continue
+            if group != ALL_GROUPS and (r["group"] or NO_GROUP) != group:
+                continue
+            out[sid] = r["surviver"]
+        return out
+
+
+def stratify(
+    raw: RawMetadata,
+    age_bands: AgeBands,
+    min_group_n: int,
+    *,
+    use_histology: bool = True,
+    histology_map: Optional[Dict[str, str]] = None,
+) -> Metadata:
+    """`use_histology=False` drops histology from Group entirely (Group
+    becomes just Stage | age band, and a sample no longer needs a histology
+    value to get one) — some cancers are heterogeneous enough that splitting
+    on histology fragments the cohort into cohorts too small to label.
+    `histology_map` (raw value -> merged label) folds selected histology
+    values together before they go into Group, e.g. several closely-related
+    subtypes that are individually too small; values not present in the map
+    are used as-is."""
+    if min_group_n < 1:
+        raise StratifyError("min_group_n must be >= 1")
+
+    sample_ids = list(raw.rows)
+    age_band = bin_ages([raw.rows[s]["age"] for s in sample_ids], age_bands)
+    hmap = histology_map or {}
+
+    group: List[Optional[str]] = []
+    for i, s in enumerate(sample_ids):
+        st = stage_label(raw.rows[s]["stage_raw"])
+        ab = age_band[i]
+        if not use_histology:
+            group.append(None if (st is None or ab is None) else f"{st} | {ab}")
+            continue
+        h = raw.rows[s]["histology"]
+        h = hmap.get(h, h) if h is not None else h
+        group.append(None if (h is None or st is None or ab is None) else f"{h} | {st} | {ab}")
+
+    os_vals = [raw.rows[s]["os"] for s in sample_ids]
+    by_group: Dict[str, List[int]] = {}
+    for i, g in enumerate(group):
+        if g is not None:
+            by_group.setdefault(g, []).append(i)
+
+    median_survival: List[Optional[float]] = [None] * len(sample_ids)
+    for idxs in by_group.values():
+        if len(idxs) < min_group_n:
+            continue
+        vals = [os_vals[i] for i in idxs if os_vals[i] is not None]
+        if not vals:
+            continue
+        m = float(np.median(vals))
+        for i in idxs:
+            median_survival[i] = m
+
+    rows: Dict[str, Dict[str, object]] = {}
+    for i, s in enumerate(sample_ids):
+        surviver = None
+        if median_survival[i] is not None and os_vals[i] is not None:
+            surviver = "Good" if os_vals[i] >= median_survival[i] else "Poor"
+        rows[s] = {"group": group[i], "surviver": surviver}
+
+    return Metadata(rows=rows, n_unmatched=raw.n_unmatched)

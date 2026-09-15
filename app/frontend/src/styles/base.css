@@ -1,0 +1,89 @@
+:root {
+  color-scheme: light dark;
+  --bg: #ffffff;
+  --panel: #f7f7f5;
+  --border: #d9d8d2;
+  --text: #1a1a19;
+  --muted: #6b6a65;
+  --accent: #2a78d6;
+  --track-blue: #2f5c9e;
+  --track-blue-utr: #9fb6d6;
+  --surface: #fcfcfb;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #131312;
+    --panel: #1e1e1c;
+    --border: #33322f;
+    --text: #f2f2ee;
+    --muted: #9c9a92;
+    --accent: #3987e5;
+    --track-blue: #7ea6e0;
+    --track-blue-utr: #3f5f8c;
+    --surface: #1a1a19;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+  background: var(--bg);
+  color: var(--text);
+}
+
+h1 {
+  font-size: 18px;
+  margin: 0 0 2px;
+}
+
+/* ---- combined-app shell (unscoped) ---- */
+.sj-root { max-width: 1200px; margin: 0 auto; padding: 20px; }
+
+/* The shell is now the outer frame; each app's own `.app` container was the
+   frame before, so neutralise its width / centring / padding when mounted here. */
+.sjv-scope .app,
+.sjvc-scope .app { max-width: none; margin: 0; padding: 0; }
+
+.sj-tabs {
+  display: flex;
+  gap: 4px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 18px;
+}
+
+.sj-tab {
+  appearance: none;
+  background: none;
+  border: 1px solid transparent;
+  border-bottom: none;
+  border-radius: 8px 8px 0 0;
+  padding: 8px 14px;
+  margin-bottom: -1px;
+  font: inherit;
+  font-weight: 600;
+  color: var(--muted);
+  cursor: pointer;
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+}
+
+.sj-tab:hover { color: var(--text); }
+
+.sj-tab.active {
+  color: var(--text);
+  background: var(--panel);
+  border-color: var(--border);
+}
+
+.sj-tab-sub {
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}

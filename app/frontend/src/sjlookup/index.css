@@ -1,0 +1,82 @@
+/* SJ Lookup stylesheet, wrapped in a scope selector (native CSS nesting) so
+   the apps' identically-named classes (.app, .panel, .row, …) never collide.
+   Shared :root tokens / body / globals live in ../styles/base.css. A small
+   subset of sjsurv/index.css's rules — this tab needs far less. */
+.sjlookup-scope {
+.app { max-width: 1200px; margin: 0 auto; padding: 20px; }
+
+.sub { color: var(--muted); margin: 0 0 18px; }
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 14px 16px;
+  margin-bottom: 14px;
+}
+
+.panel.disabled { opacity: 0.45; pointer-events: none; }
+
+.panel h2 {
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  margin: 0 0 10px;
+  display: flex;
+  align-items: center;
+}
+
+.step-num {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px; height: 20px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: #fff;
+  font-size: 12px;
+  margin-right: 8px;
+}
+
+.row { display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-end; }
+
+label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
+
+select, input[type="text"], input[type="number"], button {
+  font: inherit;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+}
+
+button { cursor: pointer; background: var(--accent); color: #fff; border-color: transparent; }
+button:disabled { opacity: 0.5; cursor: not-allowed; }
+button.ghost { background: transparent; color: var(--text); border-color: var(--border); }
+
+.chip { display: inline-flex; gap: 6px; align-items: center; font-size: 12px; color: var(--muted); }
+.muted { color: var(--muted); }
+.mono { font-variant-numeric: tabular-nums; }
+
+.warn {
+  background: #fff4e0; border: 1px solid #f0c78a; color: #6b4a12;
+  border-radius: 6px; padding: 8px 10px; font-size: 13px; margin-top: 8px;
+}
+.err {
+  background: #fdeceb; border: 1px solid #e6a6a2; color: #7a241f;
+  border-radius: 6px; padding: 8px 10px; font-size: 13px; margin-top: 8px;
+}
+@media (prefers-color-scheme: dark) {
+  .warn { background: #3a2f18; border-color: #6b552a; color: #f0d9a8; }
+  .err { background: #3a201e; border-color: #6e3833; color: #f2b7b2; }
+}
+
+table.grid { width: 100%; border-collapse: collapse; font-size: 13px; }
+table.grid th, table.grid td { padding: 5px 8px; text-align: left; border-top: 1px solid var(--border); }
+table.grid thead th { border-top: none; color: var(--muted); font-weight: 600; }
+table.grid tr.not-found td { color: var(--muted); }
+table.grid tr.invalid td { color: #b8860b; }
+.scroll-x { overflow-x: auto; }
+}

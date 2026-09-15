@@ -1,0 +1,17 @@
+# machine-specific local GENCODE paths (see scripts/prebuild_index.py)
+backend/gencode_sources.json
+
+# python
+backend/.venv/
+backend/.cache/
+backend/.cache_test/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# node
+frontend/node_modules/
+frontend/dist/
+
+# os
+.DS_Store
