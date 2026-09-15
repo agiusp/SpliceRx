@@ -1,4 +1,4 @@
-"""Combined SJ Web Apps service.
+"""Combined SpliceRx service.
 
 Mounts the previously separate apps behind one FastAPI process. Their routers
 keep their own code and session stores; they are only separated by URL prefix:
@@ -44,7 +44,7 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="SJ Web Apps", lifespan=lifespan)
+app = FastAPI(title="SpliceRx", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,

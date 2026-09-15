@@ -1,11 +1,11 @@
-# SJ Web Apps
+# SpliceRx
 
 Interactive web tools for exploring splice-junction data from TCGA cohorts
 prepared with the companion `prepTCGAdata` R package — sashimi plots,
 cohort-level novel-splice-junction heatmaps, survival-group classification,
 and direct junction lookup, all in one app.
 
-📖 **[Project page / overview](https://GITHUB-USERNAME.github.io/sj_webapps/)**
+📖 **[Project page / overview](https://GITHUB-USERNAME.github.io/SpliceRx/)**
 &nbsp;·&nbsp; run it yourself with the instructions below.
 
 ## What's in here
@@ -33,8 +33,8 @@ want to regenerate test fixtures or prepare your own TCGA cohort data with
 ### 1. Clone the repo
 
 ```bash
-git clone https://github.com/GITHUB-USERNAME/sj_webapps.git
-cd sj_webapps/app
+git clone https://github.com/GITHUB-USERNAME/SpliceRx.git
+cd SpliceRx/app
 ```
 
 ### 2. Start the backend (FastAPI, port 8000)
@@ -83,7 +83,7 @@ SJVC_CACHE_DIR=.cache_test .venv/bin/python -m pytest tests/sjvc
 ## Repo layout
 
 ```
-sj_webapps/
+SpliceRx/
 ├── app/    combined app — one backend, one frontend, all tabs (start here)
 ├── sjv/    standalone sashimi-plot app (reference / kept runnable)
 └── sjvc/   standalone NSJCG app (reference / kept runnable)

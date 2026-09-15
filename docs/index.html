@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>SJ Web Apps</title>
+<title>SpliceRx</title>
 <meta name="description" content="Interactive tools for exploring splice-junction data from TCGA cohorts: sashimi plots, cohort heatmaps, survival-group classification, and junction lookup." />
 <style>
   :root {
@@ -127,7 +127,7 @@
 <div class="wrap">
   <header>
     <p class="eyebrow">TCGA splice-junction analysis</p>
-    <h1>SJ Web Apps</h1>
+    <h1>SpliceRx</h1>
     <p class="tagline">
       Interactive tools for exploring splice-junction data prepared with the
       <code>prepTCGAdata</code> R package — sashimi plots, cohort-level
@@ -135,8 +135,8 @@
       one app you run on your own machine.
     </p>
     <div class="cta">
-      <a class="btn btn-primary" href="https://github.com/GITHUB-USERNAME/sj_webapps">View on GitHub</a>
-      <a class="btn btn-secondary" href="https://github.com/GITHUB-USERNAME/sj_webapps#running-it-locally">Run it locally</a>
+      <a class="btn btn-primary" href="https://github.com/GITHUB-USERNAME/SpliceRx">View on GitHub</a>
+      <a class="btn btn-secondary" href="https://github.com/GITHUB-USERNAME/SpliceRx#running-it-locally">Run it locally</a>
     </div>
   </header>
 
@@ -177,22 +177,22 @@
   </div>
 
   <h2>Quick start</h2>
-  <pre><code>git clone https://github.com/GITHUB-USERNAME/sj_webapps.git
-cd sj_webapps/app/backend
+  <pre><code>git clone https://github.com/GITHUB-USERNAME/SpliceRx.git
+cd SpliceRx/app/backend
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 .venv/bin/python -m uvicorn main:app --port 8000 --reload
 
 # in a second terminal
-cd sj_webapps/app/frontend
+cd SpliceRx/app/frontend
 npm install && npm run dev   # open http://localhost:5173</code></pre>
   <p>
-    See the <a href="https://github.com/GITHUB-USERNAME/sj_webapps#readme">full README</a>
+    See the <a href="https://github.com/GITHUB-USERNAME/SpliceRx#readme">full README</a>
     for prerequisites, pointing the app at your own cohort data, and running
     the test suite.
   </p>
 
   <footer>
-    Built on <a href="https://github.com/GITHUB-USERNAME/sj_webapps">github.com/GITHUB-USERNAME/sj_webapps</a>.
+    Built on <a href="https://github.com/GITHUB-USERNAME/SpliceRx">github.com/GITHUB-USERNAME/SpliceRx</a>.
   </footer>
 </div>
 </body>

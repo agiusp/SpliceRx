@@ -1,4 +1,4 @@
-# SJ Web Apps — combined
+# SpliceRx — combined
 
 One app, four tabs:
 
