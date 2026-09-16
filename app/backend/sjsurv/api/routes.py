@@ -605,10 +605,23 @@ def select(sid: str, body: SelectRequest) -> SelectResponse:
     if not labels:
         raise HTTPException(422, f"no Good/Poor-labelled sample in group {body.group!r}")
 
+    restrict_to = None
+    if body.protein_coding_only:
+        if s.annotation is None:
+            raise HTTPException(
+                409, "select a GENCODE release or upload a GTF to filter to protein-coding genes"
+            )
+        if not s.annotation.has_gene_types():
+            raise HTTPException(
+                422, "the selected reference has no gene_type / biotype attributes to filter on"
+            )
+        restrict_to = s.annotation.gene_names_of_type("protein_coding")
+
     sample_ids = [sid_ for sid_ in labels if sid_ in d._col]
     try:
         sel = select_features(
             d, sample_ids, n_min=body.n_min, x_min=body.x_min, top_n=body.top_n,
+            restrict_to=restrict_to, annotation=s.annotation,
         )
     except SelectError as e:
         raise HTTPException(422, str(e))
@@ -623,6 +636,12 @@ def select(sid: str, body: SelectRequest) -> SelectResponse:
     s.model = None
 
     warnings: List[str] = []
+    if restrict_to is not None:
+        warnings.append(
+            "restricted ranking to protein-coding genes"
+            if looks_gene_level(d.features)
+            else "restricted ranking to junctions overlapping a protein-coding gene in the reference"
+        )
     dropped = len(labels) - len(sel.sample_ids) if len(labels) > len(sel.sample_ids) else 0
     if dropped:
         warnings.append(f"{dropped} labelled sample(s) were not columns of the sjdat matrix")

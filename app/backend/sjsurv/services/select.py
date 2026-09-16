@@ -16,9 +16,13 @@ classifier is trained on.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import List, Optional, Set
 
 import numpy as np
+
+from sjvc.services.gencode import Annotation
+from sjvc.services.junctions import gene_name_of_label, looks_gene_level
+from sjvc.services.mad import junction_rownames_overlapping_genes
 
 from .sjdat import Sjdat
 
@@ -62,13 +66,22 @@ def select_features(
     n_min: Optional[float],
     x_min: Optional[float],
     top_n: int,
+    restrict_to: Optional[Set[str]] = None,
+    annotation: Optional[Annotation] = None,
 ) -> Selection:
     """Rank `sjdat`'s rows by descending MAD (on `log1p` values, over the
     group's samples) and keep the top `top_n`. `n_min`/`x_min` are an
     optional coverage prefilter — a row is a candidate only when at least
     `n_min` of the group's samples have an entry that is non-zero *and*
     `>= x_min` — meaningful for a raw per-junction matrix; passing `n_min=None`
-    skips the prefilter entirely and ranks every row."""
+    skips the prefilter entirely and ranks every row.
+
+    `restrict_to` (a set of lower-cased gene names, e.g. the protein-coding
+    genes of a reference) drops rows not in the set before ranking — a direct
+    row-name match for a gene-level sjdat, or (via `annotation`, required in
+    that case) which junctions overlap one of those genes for a junction-
+    level one. Mirrors `sjvc.services.mad.top_features_by_mad`'s own
+    `restrict_to`/`annotation` handling exactly."""
     if top_n < 1:
         raise SelectError("n (top features) must be >= 1")
     if n_min is not None and n_min <= 0:
@@ -92,6 +105,28 @@ def select_features(
         raise SelectError(
             "no feature meets the coverage threshold — lower N or X, or pick a bigger group"
         )
+
+    if restrict_to is not None:
+        if looks_gene_level(sjdat.features):
+            keep = np.array(
+                [gene_name_of_label(sjdat.features[i]).strip().lower() in restrict_to for i in passing]
+            )
+        else:
+            if annotation is None:
+                raise SelectError(
+                    "a GENCODE reference is needed to resolve junctions to genes for the "
+                    "protein-coding filter"
+                )
+            keep_rownames = junction_rownames_overlapping_genes(
+                (sjdat.features[i] for i in passing), annotation, restrict_to,
+            )
+            keep = np.array([sjdat.features[i] in keep_rownames for i in passing])
+        passing = passing[keep]
+        if passing.size == 0:
+            raise SelectError(
+                "none of the candidate features are in the requested protein-coding set — "
+                "lower the coverage threshold or turn the filter off"
+            )
 
     block = sjdat.dense_block(passing.tolist(), col_idx)         # (n_passing, n_samples)
     block = np.nan_to_num(block, nan=0.0)

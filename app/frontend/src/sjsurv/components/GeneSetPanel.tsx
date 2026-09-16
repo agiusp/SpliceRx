@@ -19,6 +19,7 @@ interface Props {
   onFeatures: (f: FeaturesResponse | null) => void;
   onModeChange: (mode: GeneSetMode) => void;
   onTopNChange: (n: number) => void;
+  onCodingOnlyChange: (v: boolean) => void;
   /** N / X — the coverage prefilter, only meaningful (and only shown here)
    *  for a junction-level sjdat (junction counts / RRS scores). Owned by the
    *  parent so it survives a tab switch. */
@@ -42,6 +43,7 @@ export default function GeneSetPanel({
   onFeatures,
   onModeChange,
   onTopNChange,
+  onCodingOnlyChange,
   nMin,
   xMin,
   onNMinChange,
@@ -66,6 +68,7 @@ export default function GeneSetPanel({
   const [library, setLibrary] = useState("");
   const [term, setTerm] = useState<{ term: string; n_genes: number } | null>(null);
   const [topN, setTopN] = useState(100);
+  const [codingOnly, setCodingOnly] = useState(false);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [result, setResult] = useState<{ matched: string[]; unmatched: string[]; warnings: string[] } | null>(null);
@@ -134,6 +137,11 @@ export default function GeneSetPanel({
     onTopNChange(topN);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [topN]);
+
+  useEffect(() => {
+    onCodingOnlyChange(codingOnly);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [codingOnly]);
 
   // Genes are resolved first; building the feature matrix (junctions -> genes)
   // always happens right after.
@@ -385,6 +393,25 @@ export default function GeneSetPanel({
               />
             </label>
           </div>
+          {!pathwayMatrixOnly && (
+            <div className="row" style={{ marginTop: 8 }}>
+              <label style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+                <input type="radio" checked={!codingOnly} onChange={() => setCodingOnly(false)} />
+                All {geneLevel ? "genes" : "junctions"}
+              </label>
+              <label style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+                <input type="radio" checked={codingOnly} onChange={() => setCodingOnly(true)} />
+                {geneLevel ? "Protein-coding genes only" : "Junctions of protein-coding genes only"}
+              </label>
+              <span className="muted" style={{ maxWidth: 360 }}>
+                Uses the selected GENCODE reference’s gene biotypes
+                {geneLevel
+                  ? ""
+                  : " — a live reference is needed even when the junction metadata table is loaded, since that table doesn't carry biotypes"}
+                .
+              </span>
+            </div>
+          )}
         </>
       )}
 

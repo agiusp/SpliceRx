@@ -381,18 +381,22 @@ export default function GeneSetPanel({
               . Runs when you hit <b>Run</b> in the View step below.
             </span>
           </div>
-          {geneLevel && !pathwayMatrixOnly && (
+          {!pathwayMatrixOnly && (
             <div className="row" style={{ marginTop: 8 }}>
               <label style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
                 <input type="radio" checked={!codingOnly} onChange={() => setCodingOnly(false)} />
-                All genes
+                All {geneLevel ? "genes" : "junctions"}
               </label>
               <label style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
                 <input type="radio" checked={codingOnly} onChange={() => setCodingOnly(true)} />
-                Protein-coding genes only
+                {geneLevel ? "Protein-coding genes only" : "Junctions of protein-coding genes only"}
               </label>
               <span className="muted" style={{ maxWidth: 360 }}>
-                “Protein-coding only” uses the selected GENCODE reference’s gene biotypes.
+                Uses the selected GENCODE reference’s gene biotypes
+                {geneLevel
+                  ? ""
+                  : " — a live reference is needed even when the junction metadata table is loaded, since that table doesn't carry biotypes"}
+                .
               </span>
             </div>
           )}

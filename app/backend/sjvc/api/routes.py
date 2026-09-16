@@ -569,10 +569,6 @@ def build_features_mad(sid: str, body: MadFeaturesRequest) -> FeaturesResponse:
 
     restrict_to = None
     if body.protein_coding_only:
-        if not looks_gene_level(s.junctions.features):
-            raise HTTPException(
-                422, "the protein-coding filter applies to gene-level matrices only"
-            )
         if s.annotation is None:
             raise HTTPException(
                 409, "select a GENCODE release or upload a GTF to filter to protein-coding genes"
@@ -591,7 +587,7 @@ def build_features_mad(sid: str, body: MadFeaturesRequest) -> FeaturesResponse:
         else:
             fm = mad_mod.top_features_by_mad(
                 s.junctions, body.top_n, restrict_to=restrict_to,
-                n_min=body.n_min, x_min=body.x_min,
+                n_min=body.n_min, x_min=body.x_min, annotation=s.annotation,
             )
     except ValueError as e:
         raise HTTPException(422, str(e))
@@ -601,13 +597,16 @@ def build_features_mad(sid: str, body: MadFeaturesRequest) -> FeaturesResponse:
 
     warnings: List[str] = []
     if restrict_to is not None:
-        n_coding = sum(
-            1 for f in s.junctions.features if gene_name_of_label(f).strip().lower() in restrict_to
-        )
-        warnings.append(
-            f"{n_coding} of {len(s.junctions.features)} matrix genes are protein-coding "
-            f"in the reference — ranked those"
-        )
+        if fm.kind == "gene":
+            n_coding = sum(
+                1 for f in s.junctions.features if gene_name_of_label(f).strip().lower() in restrict_to
+            )
+            warnings.append(
+                f"{n_coding} of {len(s.junctions.features)} matrix genes are protein-coding "
+                f"in the reference — ranked those"
+            )
+        else:
+            warnings.append("restricted ranking to junctions overlapping a protein-coding gene in the reference")
     if fm.n_features < body.top_n:
         warnings.append(
             f"only {fm.n_features} feature(s) have any variability (nonzero MAD) — asked for "

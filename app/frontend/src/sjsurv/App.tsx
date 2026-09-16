@@ -103,6 +103,7 @@ export default function App({ sessionId, reloadNonce, sjvSessionId, sjvcSessionI
   const [nMin, setNMin] = useState(0.2);
   const [xMin, setXMin] = useState(1);
   const [topN, setTopN] = useState(100);
+  const [codingOnly, setCodingOnly] = useState(false);
   const [features, setFeatures] = useState<FeaturesResponse | null>(null);
   const [nCv, setNCv] = useState(5);
 
@@ -274,6 +275,7 @@ export default function App({ sessionId, reloadNonce, sjvSessionId, sjvcSessionI
       api.select(sessionId, {
         group, top_n: topN,
         n_min: showCoverage ? nMin : null, x_min: showCoverage ? xMin : null,
+        protein_coding_only: codingOnly,
       }),
     );
     if (r) {
@@ -725,6 +727,7 @@ export default function App({ sessionId, reloadNonce, sjvSessionId, sjvcSessionI
             onFeatures={setFeatures}
             onModeChange={setGeneSetMode}
             onTopNChange={setTopN}
+            onCodingOnlyChange={setCodingOnly}
             nMin={nMin}
             xMin={xMin}
             onNMinChange={setNMin}
@@ -733,13 +736,19 @@ export default function App({ sessionId, reloadNonce, sjvSessionId, sjvcSessionI
           />
         )}
 
-        <div className="row" style={{ marginTop: 10 }}>
+        <div className="row" style={{ marginTop: 10, alignItems: "center" }}>
           <button
-            disabled={!selectReady || busy === "select" || (geneSetMode !== "mad" && !features)}
+            disabled={
+              !selectReady || busy === "select" || (geneSetMode !== "mad" && !features)
+              || (geneSetMode === "mad" && codingOnly && !state?.gencode_label)
+            }
             onClick={geneSetMode === "mad" ? doSelect : doSelectGeneset}
           >
             {busy === "select" ? "Selecting…" : "Select features"}
           </button>
+          {geneSetMode === "mad" && codingOnly && !state?.gencode_label && (
+            <span className="muted">choose a GENCODE reference on the Data tab to filter to protein-coding genes</span>
+          )}
         </div>
 
         {sel && (

@@ -615,6 +615,45 @@ def test_api_geneset_junction_level_needs_reference(client, sid):
     assert "GENCODE" in r.json()["detail"]
 
 
+def test_select_features_protein_coding_filter_gene_level():
+    d, labels = _synthetic_sjdat()
+    restrict_to = {"g0", "g3", "g7"}
+    sel = select_features(d, list(labels), n_min=None, x_min=0, top_n=10, restrict_to=restrict_to)
+    assert {f.lower() for f in sel.feature_ids} == restrict_to
+
+    with pytest.raises(SelectError):
+        select_features(d, list(labels), n_min=None, x_min=0, top_n=10, restrict_to={"nope"})
+
+
+def test_select_features_protein_coding_filter_junction_level_needs_annotation():
+    """Mirrors sjvc's own top_features_by_mad junction-level coding filter —
+    same shared helper (junction_rownames_overlapping_genes), same
+    requirement that a live GENCODE reference is loaded (the fast junction-
+    metadata lookup has no gene-biotype info to filter on)."""
+    from sjvc.services.gencode import annotation_from_gtf
+
+    ann = annotation_from_gtf(SJVC_FIXTURES / "mini.gtf", label="test")
+    restrict_to = ann.gene_names_of_type("protein_coding")
+
+    # chr1:2201-2999:+ sits inside TESTG1 only (protein_coding); chr2:5000-
+    # 6000:+ overlaps no gene at all in this reference.
+    rownames = ["chr1:2201-2999:+", "chr2:5000-6000:+"]
+    rng = np.random.default_rng(0)
+    vals = rng.poisson(3, size=(len(rownames), 20)).astype(float)
+    d = Sjdat(
+        kind="junction_counts", features=rownames, samples=[f"s{i:02d}" for i in range(20)],
+        values=vals, sparse=False,
+    )
+
+    with pytest.raises(SelectError):
+        select_features(d, d.samples, n_min=None, x_min=0, top_n=10, restrict_to=restrict_to)
+
+    sel = select_features(
+        d, d.samples, n_min=None, x_min=0, top_n=10, restrict_to=restrict_to, annotation=ann,
+    )
+    assert sel.feature_ids == ["chr1:2201-2999:+"]
+
+
 def test_api_select_geneset_needs_features_first(client, sid):
     _loaded_gene_session(client, sid)
     r = client.post(f"/api/session/{sid}/select-geneset", json={"group": "__all__"})

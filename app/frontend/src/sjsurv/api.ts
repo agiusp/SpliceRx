@@ -179,6 +179,7 @@ export interface SelectParams {
   n_min: number | null;
   x_min: number | null;
   top_n: number;
+  protein_coding_only: boolean;
 }
 
 export interface StratifyParams {
@@ -205,6 +206,7 @@ export const api = {
   select: (sid: string, p: SelectParams) =>
     j<SelectResponse>(postJson(`/api/sjsurv/session/${sid}/select`, {
       group: p.group, n_min: p.n_min, x_min: p.x_min, top_n: p.top_n,
+      protein_coding_only: p.protein_coding_only,
     })),
   // gene-set feature resolution — mirrors sjvc's setGeneset/buildFeatures
   // exactly, just against SJSurv's own session/matrix

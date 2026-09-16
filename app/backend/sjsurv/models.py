@@ -125,6 +125,7 @@ class SelectRequest(BaseModel):
     n_min: Optional[float] = None  # N — count if >= 1, else fraction of the group
     x_min: Optional[float] = 0.0   # X — minimum magnitude of a counted entry
     top_n: int = 100               # n — keep this many by MAD
+    protein_coding_only: bool = False   # restrict ranking to protein_coding-biotype genes
 
 
 class SelectGenesetRequest(BaseModel):

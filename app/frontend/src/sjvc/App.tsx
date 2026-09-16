@@ -157,7 +157,7 @@ export default function App({ sessionId, reloadNonce }: Props) {
     try {
       const showCoverage = activeSjdat === "junction_counts" || activeSjdat === "rrs_scores";
       const f = await api.buildFeaturesMad(
-        sid, madTopN, matrixKind === "gene" && madCodingOnly,
+        sid, madTopN, madCodingOnly,
         showCoverage ? madNMin : null, showCoverage ? madXMin : 0,
       );
       setFeatures(f);
@@ -282,7 +282,7 @@ export default function App({ sessionId, reloadNonce }: Props) {
         </div>
 
         {geneSetMode === "mad" && (() => {
-          const needsRef = matrixKind === "gene" && madCodingOnly && !gencodeLabel;
+          const needsRef = madCodingOnly && !gencodeLabel;
           return (
             <div className="row" style={{ marginTop: 10 }}>
               <button disabled={madBusy || madTopN < 1 || needsRef} onClick={runMad}>
@@ -291,7 +291,7 @@ export default function App({ sessionId, reloadNonce }: Props) {
                   ? "pathways"
                   : matrixKind === "gene"
                     ? madCodingOnly ? "protein-coding genes" : "genes"
-                    : "junctions"}{" "}
+                    : madCodingOnly ? "junctions (protein-coding genes)" : "junctions"}{" "}
                 by MAD
               </button>
               {madBusy && <span className="muted">computing…</span>}

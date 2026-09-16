@@ -29,7 +29,7 @@ varying — that row is real, just not a top-ranked one, and stays eligible.
 from __future__ import annotations
 
 from collections import defaultdict
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 import numpy as np
 
@@ -132,9 +132,29 @@ def refine_by_mad(fm: FeatureMatrix, top_n: int) -> FeatureMatrix:
     )
 
 
+def junction_rownames_overlapping_genes(
+    rownames: Iterable[str], annotation: Annotation, gene_names: Set[str],
+) -> Set[str]:
+    """Which of `rownames` (chr:start-end:strand) overlap at least one gene
+    in `annotation` whose name (lower-cased) is in `gene_names` — the
+    junction-level equivalent of matching a gene-level matrix's row names
+    directly against a gene-name set (used by `top_features_by_mad` below,
+    and by SJSurv's own `services.select.select_features`, to restrict MAD
+    ranking to junctions of protein-coding genes)."""
+    genes = _load_all_genes(annotation)
+    groups = _group_genes(genes)
+    gene_name_by_id = {g.gene_id: g.name for g in genes}
+    jgmap = _map_all_junctions(list(rownames), groups)
+    return {
+        rn for rn, gids in jgmap.items()
+        if any(gene_name_by_id.get(gid, "").strip().lower() in gene_names for gid in gids)
+    }
+
+
 def top_features_by_mad(
     matrix: Matrix, top_n: int, *, restrict_to: Optional[Set[str]] = None,
     n_min: Optional[float] = None, x_min: float = 0.0,
+    annotation: Optional[Annotation] = None,
 ) -> FeatureMatrix:
     """Rank the matrix's rows by descending MAD and keep the top N.
 
@@ -144,8 +164,13 @@ def top_features_by_mad(
     (kind="gene").
 
     `restrict_to` (a set of lower-cased gene names, e.g. the protein-coding
-    genes of a reference) only applies in the gene-level case: rows whose
-    name isn't in the set are dropped before ranking.
+    genes of a reference) drops rows not in the set before ranking. In the
+    gene-level case this is a direct row-name match; in the junction-level
+    case it needs `annotation` to resolve which gene(s) each junction
+    overlaps (`junction_rownames_overlapping_genes` above) — the cohort's own
+    junction-metadata gene lookup, when loaded, has no gene-biotype
+    information to filter on, so a live GENCODE reference is required either
+    way.
 
     `n_min`/`x_min` are an optional coverage prefilter, applied before
     ranking: a row is a candidate only when at least `n_min` samples (a count
@@ -163,6 +188,20 @@ def top_features_by_mad(
 
     if junction_idx:
         idx, kind = junction_idx, "junction"
+        if restrict_to is not None:
+            if annotation is None:
+                raise ValueError(
+                    "a GENCODE reference is needed to resolve junctions to genes for the "
+                    "protein-coding filter"
+                )
+            keep_rownames = junction_rownames_overlapping_genes(
+                (matrix.features[i] for i in idx), annotation, restrict_to,
+            )
+            idx = [i for i in idx if matrix.features[i] in keep_rownames]
+            if not idx:
+                raise ValueError(
+                    "none of the matrix's junctions overlap a protein-coding gene in the reference"
+                )
     else:
         idx, kind = list(range(len(matrix.features))), "gene"
         if restrict_to is not None:

@@ -270,6 +270,38 @@ def test_mad_protein_coding_filter(client):
     assert any("protein-coding" in w for w in pc["warnings"])
 
 
+def test_mad_protein_coding_filter_junction_level(client):
+    """Same filter as test_mad_protein_coding_filter, now for a raw junction-
+    level matrix: restricting the ranking to junctions overlapping a
+    protein-coding gene needs a live GENCODE reference to resolve the
+    overlap (the fast junction-metadata lookup carries no gene-biotype
+    info), same as the gene-level case."""
+    sid = client.post("/api/session").json()["session_id"]
+    client.post(f"/api/session/{sid}/junctions",
+                files={"file": ("j.rds", open(FIXTURES / "mini_junctions.rds", "rb"))})
+
+    r = client.post(f"/api/session/{sid}/features/mad",
+                    json={"top_n": 20, "protein_coding_only": True})
+    assert r.status_code == 409
+
+    client.post(f"/api/session/{sid}/gtf",
+                files={"file": ("mini.gtf", open(FIXTURES / "mini.gtf", "rb"))})
+
+    # mini.gtf's genes are all on chr1 (TESTG1/TESTG2 protein_coding, OTHERG
+    # lncRNA but entirely inside TESTG1's span) — chr2:5000-6000:+ overlaps no
+    # gene at all in the reference, so it's the one junction the coding
+    # filter drops that an unfiltered ranking would keep.
+    unfiltered = client.post(f"/api/session/{sid}/features/mad",
+                             json={"top_n": 20, "protein_coding_only": False}).json()
+    assert "chr2:5000-6000:+" in unfiltered["feature_preview"]
+
+    pc = client.post(f"/api/session/{sid}/features/mad",
+                     json={"top_n": 20, "protein_coding_only": True}).json()
+    assert pc["feature_kind"] == "junction"
+    assert "chr2:5000-6000:+" not in pc["feature_preview"]
+    assert any("protein-coding" in w for w in pc["warnings"])
+
+
 def test_projection_encodings(client, ready_session):
     p1 = client.post(f"/api/session/{ready_session}/projection",
                      json={"method": "pca", "clinical": ["subtype"]}).json()
