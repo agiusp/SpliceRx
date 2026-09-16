@@ -27,6 +27,13 @@ class Session:
 
     index: Optional[Any] = None   # services.lookup.JunctionLookupIndex
 
+    # optional sjdat matrices (junction_counts / rrs_scores only — the two
+    # junction-level ones, keyed by "chr:start-end:strand" like `index`) —
+    # kind -> sjvc.services.sjdat.Sjdat. Loading these is optional; a lookup
+    # works from `index` alone, they only add the per-sample table for a
+    # single-junction query.
+    sjdat: Dict[str, Any] = field(default_factory=dict)
+
     def touch(self) -> None:
         self.last_seen = time.time()
 

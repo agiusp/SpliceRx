@@ -14,6 +14,8 @@
 - POST /sjsurv/{sid}/metadata        load the sample metadata into an SJSurv session
 - POST /sjsurv/{sid}/junction-metadata load the per-junction gene annotation table into SJSurv
 - POST /sjlookup/{sid}/junction-metadata load the per-junction metadata table into SJ Lookup
+- POST /sjlookup/{sid}/sjdat/{kind}      load junction_counts / rrs_scores into an SJ Lookup
+                                     session — the per-sample table for a single-junction lookup
 """
 from __future__ import annotations
 
@@ -33,8 +35,14 @@ from sjsurv.models import (
     SjdatLoaded as SjsurvSjdatLoaded,
 )
 from sjsurv.services.sessions import store as sjsurv_store
-from sjlookup.api.routes import ingest_junction_metadata as sjlookup_ingest_junction_metadata
-from sjlookup.models import JunctionMetadataLoaded as SjlookupJunctionMetadataLoaded
+from sjlookup.api.routes import (
+    ingest_junction_metadata as sjlookup_ingest_junction_metadata,
+    ingest_sjdat as sjlookup_ingest_sjdat,
+)
+from sjlookup.models import (
+    JunctionMetadataLoaded as SjlookupJunctionMetadataLoaded,
+    SjdatLoaded as SjlookupSjdatLoaded,
+)
 from sjlookup.services.sessions import store as sjlookup_store
 from sjv.api.routes import ingest_rds, ingest_sample_metadata
 from sjv.models import RdsUploaded, SampleMetadataUploaded
@@ -293,3 +301,9 @@ def load_sjlookup_junction_metadata(sid: str, body: PathBody) -> SjlookupJunctio
     return sjlookup_ingest_junction_metadata(
         s, _copy_in(s, f"junction_metadata{''.join(src.suffixes) or '.rds'}", src)
     )
+
+
+@router.post("/sjlookup/{sid}/sjdat/{kind}", response_model=SjlookupSjdatLoaded)
+def load_sjlookup_sjdat(sid: str, kind: str, body: PathBody) -> SjlookupSjdatLoaded:
+    s = _session(sjlookup_store, sid)
+    return sjlookup_ingest_sjdat(s, kind, _copy_in(s, f"sjdat_{kind}.rds", _file_arg(body.path)))

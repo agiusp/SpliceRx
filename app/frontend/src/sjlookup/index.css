@@ -79,4 +79,6 @@ table.grid thead th { border-top: none; color: var(--muted); font-weight: 600; }
 table.grid tr.not-found td { color: var(--muted); }
 table.grid tr.invalid td { color: #b8860b; }
 .scroll-x { overflow-x: auto; }
+.scroll-y { max-height: 420px; overflow-y: auto; border: 1px solid var(--border); border-radius: 6px; }
+.scroll-y table.grid thead th { position: sticky; top: 0; background: var(--panel); }
 }

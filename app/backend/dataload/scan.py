@@ -52,7 +52,8 @@ def classify_one(path: Path) -> ScanFile:
     if _RRS.search(lower):
         return mk(
             "rrs_scores", "sjsurv", "ok",
-            "RRS score matrix (feature x sample) — an sjdat choice for 2D View and SJSurv",
+            "RRS score matrix (feature x sample) — an sjdat choice for 2D View and SJSurv, and "
+            "(with junction counts) the per-sample table on a single-junction SJ Lookup",
         )
     if _JUNCTION_META.search(lower):
         return mk(
@@ -73,9 +74,10 @@ def classify_one(path: Path) -> ScanFile:
     if _JUNCTION_COUNTS.search(lower) or size > _BIG_RDS:
         return mk(
             "junction_counts", "sjv", "ok",
-            "junction-level count matrix — loads into the Sashimi plot, and an sjdat "
-            "choice for 2D View and SJSurv; the first load of a big sparse matrix takes "
-            "~1 min to index, then it's cached",
+            "junction-level count matrix — loads into the Sashimi plot, an sjdat choice for "
+            "2D View and SJSurv, and (with RRS scores) the per-sample table on a single-"
+            "junction SJ Lookup; the first load of a big sparse matrix takes ~1 min to index, "
+            "then it's cached",
         )
     if _MSI.search(lower):
         return mk(

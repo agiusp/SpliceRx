@@ -102,10 +102,13 @@ export const dataloadApi = {
   loadSjsurvJunctionMetadata: (sid: string, path: string) =>
     j<JunctionMetadataLoaded>(post(`/api/dataload/sjsurv/${sid}/junction-metadata`, { path })),
 
-  // SJ Lookup (per-junction lookup) — only ever needs the junction metadata
-  // table, never a matrix
+  // SJ Lookup (per-junction lookup) — the junction metadata table drives the
+  // lookup itself; junction counts / RRS scores are optional, adding the
+  // per-sample table for a single-junction lookup
   loadSjlookupJunctionMetadata: (sid: string, path: string) =>
     j<SjlookupJunctionMetadataLoaded>(post(`/api/dataload/sjlookup/${sid}/junction-metadata`, { path })),
+  loadSjlookupSjdat: (sid: string, kind: string, path: string) =>
+    j<SjdatLoaded>(post(`/api/dataload/sjlookup/${sid}/sjdat/${kind}`, { path })),
 
   // push SJSurv's Group/SurviverGroup into the Sashimi-plot / 2D View sessions
   pushGroups: (sjsurv_sid: string, sjv_sid: string | null, sjvc_sid: string | null) =>

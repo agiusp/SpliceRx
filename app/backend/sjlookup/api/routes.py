@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 import numpy as np
 import pandas as pd
@@ -13,15 +13,23 @@ from ..models import (
     JunctionMetadataLoaded,
     LookupRequest,
     LookupResponse,
+    SampleValue,
     SessionCreated,
     SessionState,
+    SjdatLoaded,
 )
-from ..services.lookup import load_junction_lookup_index, parse_junction_list
+from ..services.lookup import classify_unannotated, load_junction_lookup_index, parse_junction_list
 from ..services.sessions import store
 from sjvc.services.junction_metadata import JunctionMetadataError
 from sjvc.services.junctions import RownameError, parse_rowname
+from sjvc.services.sjdat import SjdatError, load_sjdat
 
 router = APIRouter()
+
+# the two junction-level sjdat matrices — the ones a "chr:start-end:strand"
+# lookup key can actually address; gene_matrix/pathway_matrix are condensed
+# past individual junctions, so SJ Lookup has no use for them
+_SJDAT_KINDS = ("junction_counts", "rrs_scores")
 
 _CAP = 2 * 1024 * 1024 * 1024
 
@@ -96,10 +104,92 @@ async def upload_junction_metadata(sid: str, file: UploadFile = File(...)) -> Ju
     return ingest_junction_metadata(s, dest)
 
 
+def ingest_sjdat(s, kind: str, src: Path) -> SjdatLoaded:
+    """Load the junction-counts or RRS-scores matrix at ``src`` into the
+    session. ``src`` is consumed. Shared by the browser-upload endpoint below
+    and the dataload package — mirrors sjvc/sjsurv's own ``ingest_sjdat``, but
+    without their clinical-sample intersection step: SJ Lookup never narrows
+    to a sample set, it just reports whatever samples the matrix has."""
+    if kind not in _SJDAT_KINDS:
+        src.unlink(missing_ok=True)
+        raise HTTPException(422, f"unknown sjdat kind {kind!r} — SJ Lookup only uses junction_counts / rrs_scores")
+    try:
+        d = load_sjdat(kind, src, s.tmp_dir)
+    except SjdatError as e:
+        raise HTTPException(422, str(e))
+    finally:
+        src.unlink(missing_ok=True)
+    s.sjdat[kind] = d
+    return SjdatLoaded(kind=kind, n_features=d.n_features, n_samples=d.n_samples, sparse=d.sparse)
+
+
+@router.post("/session/{sid}/sjdat/{kind}", response_model=SjdatLoaded)
+async def upload_sjdat(sid: str, kind: str, file: UploadFile = File(...)) -> SjdatLoaded:
+    s = _session(sid)
+    dest = s.tmp_dir / f"sjdat_{kind}.rds"
+    await _save_upload(file, dest)
+    return ingest_sjdat(s, kind, dest)
+
+
 @router.get("/session/{sid}/state", response_model=SessionState)
 def session_state(sid: str) -> SessionState:
     s = _session(sid)
-    return SessionState(has_index=s.index is not None, n_rows=s.index.n_rows if s.index else 0)
+    return SessionState(
+        has_index=s.index is not None, n_rows=s.index.n_rows if s.index else 0,
+        sjdat_loaded=sorted(s.sjdat.keys()),
+    )
+
+
+def _sample_values(s, key: str) -> "tuple[Optional[List[SampleValue]], List[str]]":
+    """Every sample's read count / RRS score for the single junction ``key``
+    (``chr:start-end:strand``), sorted descending by RRS score (missing RRS
+    scores last, then by sample id). ``None`` — not ``[]`` — when neither
+    matrix is loaded at all, so the frontend can tell "nothing to show" apart
+    from "loaded, but this junction isn't in either matrix"."""
+    counts_d = s.sjdat.get("junction_counts")
+    rrs_d = s.sjdat.get("rrs_scores")
+    if counts_d is None and rrs_d is None:
+        return None, []
+
+    warnings: List[str] = []
+    if counts_d is None:
+        warnings.append("load the junction-counts matrix on the Data tab for per-sample read counts")
+    if rrs_d is None:
+        warnings.append("load the RRS-scores matrix on the Data tab for per-sample RRS scores")
+
+    counts_row = counts_d._row.get(key) if counts_d is not None else None
+    rrs_row = rrs_d._row.get(key) if rrs_d is not None else None
+    if counts_d is not None and counts_row is None:
+        warnings.append("this junction is not a row of the loaded junction-counts matrix")
+    if rrs_d is not None and rrs_row is None:
+        warnings.append("this junction is not a row of the loaded RRS-scores matrix")
+    if counts_row is None and rrs_row is None:
+        return [], warnings
+
+    # sample universe: whichever matrix has this junction as a row; when both
+    # do and their sample lists differ (a mismatched pair of files), the union
+    if counts_row is not None and rrs_row is not None and counts_d.samples != rrs_d.samples:
+        samples = sorted(set(counts_d.samples) | set(rrs_d.samples))
+    else:
+        samples = counts_d.samples if counts_row is not None else rrs_d.samples
+
+    counts_vals = counts_d.dense_block([counts_row], list(range(counts_d.n_samples)))[0] if counts_row is not None else None
+    rrs_vals = rrs_d.dense_block([rrs_row], list(range(rrs_d.n_samples)))[0] if rrs_row is not None else None
+    counts_col = counts_d._col if counts_d is not None else {}
+    rrs_col = rrs_d._col if rrs_d is not None else {}
+
+    def _val(vals, col, sample):
+        if vals is None or sample not in col:
+            return None
+        v = float(vals[col[sample]])
+        return None if np.isnan(v) else v
+
+    out = [
+        SampleValue(sample=sample, count=_val(counts_vals, counts_col, sample), rrs_score=_val(rrs_vals, rrs_col, sample))
+        for sample in samples
+    ]
+    out.sort(key=lambda sv: (sv.rrs_score is None, -(sv.rrs_score or 0.0), sv.sample))
+    return out, warnings
 
 
 @router.post("/session/{sid}/lookup", response_model=LookupResponse)
@@ -114,6 +204,7 @@ def lookup(sid: str, body: LookupRequest) -> LookupResponse:
 
     results: List[JunctionInfo] = []
     n_found = n_not_found = n_invalid = 0
+    single_key = None  # set only when exactly one (valid) junction was queried
     for j in junctions:
         try:
             parsed = parse_rowname(j)
@@ -124,8 +215,10 @@ def lookup(sid: str, body: LookupRequest) -> LookupResponse:
 
         # look up by the *normalised* key (parse_rowname reorders a reversed
         # start/end into ascending order) — same identity the index itself
-        # was built from
+        # was built from, and the sjdat matrices below use the same convention
         key = f"{parsed.chrom}:{parsed.start}-{parsed.end}:{parsed.strand}"
+        if len(junctions) == 1:
+            single_key = key
         row = s.index.lookup(key)
         if row is None:
             results.append(JunctionInfo(junction=j, found=False))
@@ -136,9 +229,17 @@ def lookup(sid: str, body: LookupRequest) -> LookupResponse:
             junction=j, found=True,
             gene_id=_clean(row.get("gene_id")), gene_name=_clean(row.get("gene_name")),
             width=_clean(row.get("width")), annotated=_clean(row.get("annotated")),
+            category=classify_unannotated(s.index, row),
             left_motif=_clean(row.get("left_motif")), right_motif=_clean(row.get("right_motif")),
             left_annotated=_clean(row.get("left_annotated")), right_annotated=_clean(row.get("right_annotated")),
         ))
         n_found += 1
 
-    return LookupResponse(results=results, n_found=n_found, n_not_found=n_not_found, n_invalid=n_invalid)
+    sample_values, sample_values_warnings = (None, [])
+    if single_key is not None:
+        sample_values, sample_values_warnings = _sample_values(s, single_key)
+
+    return LookupResponse(
+        results=results, n_found=n_found, n_not_found=n_not_found, n_invalid=n_invalid,
+        sample_values=sample_values, sample_values_warnings=sample_values_warnings,
+    )
