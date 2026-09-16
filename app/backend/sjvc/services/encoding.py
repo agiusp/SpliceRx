@@ -37,6 +37,7 @@ def build(
         return {
             "colors": [NEUTRAL] * n,
             "shapes": ["circle"] * n,
+            "missing": [False] * n,
             "encoding": {"color": {"kind": "none"}, "shape": {"kind": "none"}},
             "legend": {},
         }
@@ -48,13 +49,24 @@ def build(
 
     colors = [NEUTRAL] * n
     shapes = ["circle"] * n
+    # True wherever `colors[i]` below is the "#cfcfcf" grey-for-missing-data
+    # marker — i.e. exactly the points a viewer would call "grey" and the
+    # projection's "hide samples missing this data" toggle removes. A missing
+    # *shape*-only feature (both features picked, only the categorical one
+    # missing) doesn't turn a point grey today, so it isn't "missing" here
+    # either — this mirrors that existing visual, not a stricter definition.
+    missing = [False] * n
     encoding: Dict = {"color": {"kind": "none"}, "shape": {"kind": "none"}}
     legend: Dict = {}
 
     def color_categorical(name: str, vals: List[Optional[str]]):
         cmap = palette.categorical_colors([v for v in vals if v is not None])
         for i, v in enumerate(vals):
-            colors[i] = cmap.get(v, palette.OTHER[0]) if v is not None else "#cfcfcf"
+            if v is None:
+                colors[i] = "#cfcfcf"
+                missing[i] = True
+            else:
+                colors[i] = cmap.get(v, palette.OTHER[0])
         encoding["color"] = {"kind": "categorical", "feature": name}
         legend["color"] = {
             "feature": name,
@@ -65,7 +77,11 @@ def build(
     def color_numeric(name: str, vals: np.ndarray):
         t = _robust01(vals)
         for i in range(n):
-            colors[i] = "#cfcfcf" if not np.isfinite(vals[i]) else palette.sequential_color(t[i])
+            if not np.isfinite(vals[i]):
+                colors[i] = "#cfcfcf"
+                missing[i] = True
+            else:
+                colors[i] = palette.sequential_color(t[i])
         finite = vals[np.isfinite(vals)]
         encoding["color"] = {"kind": "sequential", "feature": name}
         legend["color"] = {
@@ -89,7 +105,7 @@ def build(
     if len(typed) == 1:
         name, kind, vals = typed[0]
         color_numeric(name, vals) if kind == "numeric" else color_categorical(name, vals)
-        return {"colors": colors, "shapes": shapes, "encoding": encoding, "legend": legend}
+        return {"colors": colors, "shapes": shapes, "missing": missing, "encoding": encoding, "legend": legend}
 
     (n1, k1, v1), (n2, k2, v2) = typed
     if k1 == "categorical" and k2 == "categorical":
@@ -100,6 +116,7 @@ def build(
         for i in range(n):
             if not (np.isfinite(v1[i]) and np.isfinite(v2[i])):
                 colors[i] = "#cfcfcf"
+                missing[i] = True
             else:
                 colors[i] = palette.bivariate_color(float(t1[i]), float(t2[i]))
         encoding["color"] = {"kind": "bivariate", "features": [n1, n2]}
@@ -122,4 +139,4 @@ def build(
         color_numeric(num_n, num_v)
         shape_categorical(cat_n, cat_v)
 
-    return {"colors": colors, "shapes": shapes, "encoding": encoding, "legend": legend}
+    return {"colors": colors, "shapes": shapes, "missing": missing, "encoding": encoding, "legend": legend}

@@ -66,6 +66,11 @@ export default function App({ sessionId, reloadNonce }: Props) {
   const [order, setOrder] = useState<"cluster" | "group">("cluster");
   const [groupBy, setGroupBy] = useState("");
   const [rowZ, setRowZ] = useState(true);
+  // Heatmap-only: drop samples missing a selected clinical feature instead of
+  // showing them with a grey annotation cell. Unlike the projection's
+  // equivalent (a pure display filter — see Projection.tsx), this actually
+  // changes which columns are clustered, so it has to go back to the server.
+  const [dropMissingClinical, setDropMissingClinical] = useState(false);
   const [nNeighbors, setNNeighbors] = useState(15);
   const [minDist, setMinDist] = useState(0.1);
 
@@ -143,7 +148,7 @@ export default function App({ sessionId, reloadNonce }: Props) {
     timer.current = window.setTimeout(runPlot, 250);
     return () => window.clearTimeout(timer.current);
     // eslint-disable-next-line
-  }, [ready, view, selected, overrides, order, groupBy, rowZ, nNeighbors, minDist, features]);
+  }, [ready, view, selected, overrides, order, groupBy, rowZ, dropMissingClinical, nNeighbors, minDist, features]);
 
   async function runMad() {
     if (!sid) return;
@@ -191,6 +196,7 @@ export default function App({ sessionId, reloadNonce }: Props) {
           group_by: order === "group" ? groupBy || catCols[0]?.name : undefined,
           row_zscore: rowZ,
           overrides,
+          drop_missing_clinical: dropMissingClinical,
         });
         setHeat(h);
         setProj(null);
@@ -359,6 +365,22 @@ export default function App({ sessionId, reloadNonce }: Props) {
                 ))}
               </select>
             )}
+            <label
+              style={{ flexDirection: "row", alignItems: "center", gap: 6 }}
+              title={
+                selected.length === 0
+                  ? "select a clinical feature above first"
+                  : "rebuilds the heatmap without the dropped samples"
+              }
+            >
+              <input
+                type="checkbox"
+                checked={dropMissingClinical}
+                disabled={selected.length === 0}
+                onChange={(e) => setDropMissingClinical(e.target.checked)}
+              />
+              drop samples missing selected clinical data
+            </label>
           </div>
         )}
 

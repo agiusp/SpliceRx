@@ -34,6 +34,7 @@ from ..models import (
 from ..services import encoding, features as feat_mod, gencode, geneset as gs_mod, heatmap as hm_mod, mad as mad_mod, pathways, projection as proj_mod
 from ..services.clinical import parse_clinical
 from ..services.junction_metadata import JunctionMetadataError, load_junction_gene_index
+from ..services.junction_type import load_junction_type_index
 from ..services.junctions import gene_name_of_label, looks_gene_level, map_junctions_to_genes
 from ..services.rds import MatrixError
 from ..services.sjdat import SJDAT_KINDS, SJDAT_META, SjdatError, load_sjdat
@@ -196,14 +197,26 @@ def ingest_junction_metadata(s, src: Path) -> JunctionMetadataLoaded:
     """Load the per-junction annotation table (``TCGA_<cohort>_junction_
     metadata.rds``) — enables fast typed-gene / pathway lookups against a
     junction-level matrix (junction counts, RRS scores) without needing a
-    GENCODE release at all. See ``services/junction_metadata.py``."""
+    GENCODE release at all. See ``services/junction_metadata.py``.
+
+    Also builds the gene-name/splice-type index the junction-level heatmap's
+    alternate row-label view uses (``services/junction_type.py``) from the
+    same file, before it's removed below — this is best-effort: a table this
+    app can otherwise use just fine but that lacks a gene-name column simply
+    doesn't get that view, rather than failing the whole load."""
     try:
         idx = load_junction_gene_index(src, s.tmp_dir)
     except JunctionMetadataError as e:
+        src.unlink(missing_ok=True)
         raise HTTPException(422, str(e))
+    try:
+        type_idx = load_junction_type_index(src, s.tmp_dir)
+    except JunctionMetadataError:
+        type_idx = None
     finally:
         src.unlink(missing_ok=True)
     s.junction_gene_index = idx
+    s.junction_type_index = type_idx
     s.geneset = None
     s.features = None
     return JunctionMetadataLoaded(n_rows=idx.n_rows, n_genes=len(idx.gene_id_to_name))
@@ -685,6 +698,10 @@ def projection(sid: str, body: ProjectionRequest) -> dict:
             "y": float(emb.coords[i, yi]),
             "color": enc["colors"][i],
             "shape": enc["shapes"][i],
+            # True when this point is drawn grey — missing the selected
+            # clinical feature(s) — so the frontend can offer "hide these"
+            # without another request (the projection itself is unaffected).
+            "missing": bool(enc["missing"][i]),
             "clinical": {f: clin_vals.get(f, [None] * len(prep.samples))[i] for f in clinical_feats},
         })
 
@@ -708,19 +725,48 @@ def heatmap(sid: str, body: HeatmapRequest) -> dict:
         raise HTTPException(409, "build the feature matrix first")
     _apply_overrides(s, body.overrides)
 
+    # Drop samples missing any selected clinical annotation before clustering
+    # — unlike the projection's equivalent toggle (a post-hoc point filter,
+    # no recompute needed), a heatmap column is baked into the clustering
+    # itself, so this has to rebuild it from a narrower feature matrix.
+    fm = s.features
+    extra_warnings: List[str] = []
+    if body.drop_missing_clinical and body.clinical:
+        if s.clinical is None:
+            raise HTTPException(422, "no clinical table loaded to check for missing values against")
+        keep = np.ones(fm.n_samples, dtype=bool)
+        for f in body.clinical:
+            vals, kind = s.clinical.values_for(f, fm.samples)
+            present = np.isfinite(vals) if kind == "numeric" else np.array([v is not None for v in vals])
+            keep &= present
+        n_dropped = int((~keep).sum())
+        if n_dropped:
+            if not keep.any():
+                raise HTTPException(
+                    422,
+                    "every sample is missing at least one of the selected clinical feature(s) "
+                    "— nothing left to show",
+                )
+            fm = feat_mod.subset_samples(fm, keep)
+            extra_warnings.append(
+                f"dropped {n_dropped} of {len(keep)} sample(s) missing "
+                + ", ".join(body.clinical)
+            )
+
     group_values = None
     if body.order == "group":
         if not body.group_by or s.clinical is None:
             raise HTTPException(422, "group order needs `group_by` and a clinical table")
-        gv, _ = s.clinical.values_for(body.group_by, s.features.samples)
+        gv, _ = s.clinical.values_for(body.group_by, fm.samples)
         group_values = [None if v is None else str(v) for v in gv]
 
     try:
         res = hm_mod.build(
-            s.features, row_zscore=body.row_zscore, order=body.order, group_values=group_values,
+            fm, row_zscore=body.row_zscore, order=body.order, group_values=group_values,
         )
     except ValueError as e:
         raise HTTPException(422, str(e))
+    res.warnings = extra_warnings + res.warnings
 
     # clinical annotation tracks, aligned to the displayed column order.
     # Successive categorical tracks take non-overlapping hues, and successive
@@ -760,13 +806,33 @@ def heatmap(sid: str, body: HeatmapRequest) -> dict:
                     "legend": [{"value": v, "color": cmap[v]} for v in distinct],
                 })
 
+    # Alternate row labels for a junction-level heatmap: "<gene name>:<novel-
+    # splicing-event type>" instead of the raw "chr:start-end:strand" id,
+    # from the cohort's own junction metadata table (see
+    # services/junction_type.py) — only offered when that table was loaded
+    # and this heatmap is junction-level (a gene/pathway matrix is already
+    # one row per gene, nothing to map). The frontend toggles between this
+    # and `row_labels` without another request, since only the label text
+    # differs — row order and values are identical either way.
+    row_labels_gene_type = None
+    if fm.kind == "junction" and s.junction_type_index is not None:
+        row_labels_gene_type = s.junction_type_index.labels_for(res.feature_ids)
+        n_unlabelled = sum(1 for label in row_labels_gene_type if label is None)
+        if n_unlabelled:
+            res.warnings.append(
+                f"{n_unlabelled} of {len(row_labels_gene_type)} displayed junction(s) have no "
+                "gene annotation in the junction metadata table — shown by coordinate in the "
+                "gene/type row-label view"
+            )
+
     return {
-        "feature_kind": s.features.kind,
+        "feature_kind": fm.kind,
         # trim a "<gene_name>:<gene_id>" row label (count_novel_sjs() output,
         # e.g. TP53:ENSG00000141510.19) down to just the gene name for display;
         # junction (chr:start-end:strand) and pathway row labels are left
         # alone — gene_name_of_label only strips a trailing real Ensembl id
-        "row_labels": [gene_name_of_label(s.features.label(i)) for i in res.feature_ids],
+        "row_labels": [gene_name_of_label(fm.label(i)) for i in res.feature_ids],
+        "row_labels_gene_type": row_labels_gene_type,
         "row_ids": res.feature_ids,
         "samples": res.samples,
         "values": [[float(x) for x in row] for row in res.values],

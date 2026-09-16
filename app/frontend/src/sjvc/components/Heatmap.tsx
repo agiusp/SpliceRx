@@ -13,6 +13,17 @@ export default function Heatmap({ data }: { data: HeatmapResponse }) {
   const [hover, setHover] = useState<{ x: number; y: number; lines: string[] } | null>(null);
   const [compact, setCompact] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
+  // "junction" = the raw chr:start-end:strand row id (always available);
+  // "gene_type" = "<gene name>:<novel-splicing-event type>" from the
+  // cohort's junction metadata table — only offered when the backend sent
+  // it. Toggling is purely a label swap: row order/values are unaffected,
+  // so no new request is made.
+  const [labelMode, setLabelMode] = useState<"junction" | "gene_type">("junction");
+  const hasGeneTypeLabels = !!data.row_labels_gene_type;
+  const rowLabels =
+    labelMode === "gene_type" && data.row_labels_gene_type
+      ? data.row_labels_gene_type.map((lab, i) => lab ?? data.row_labels[i])
+      : data.row_labels;
 
   const nRows = data.values.length;
   const nCols = data.samples.length;
@@ -259,6 +270,15 @@ export default function Heatmap({ data }: { data: HeatmapResponse }) {
           <input type="checkbox" checked={compact} onChange={(e) => setCompact(e.target.checked)} />
           compact
         </label>
+        {hasGeneTypeLabels && (
+          <label style={{ display: "flex", flexDirection: "row", alignItems: "center", gap: 6 }}>
+            row labels
+            <select value={labelMode} onChange={(e) => setLabelMode(e.target.value as typeof labelMode)}>
+              <option value="junction">junction id</option>
+              <option value="gene_type">gene : splice type</option>
+            </select>
+          </label>
+        )}
         <span className="chip">
           {data.feature_kind === "gene" ? "gene signatures" : "junctions"} · {nRows} × {nCols}
           {data.row_zscore ? " · row z-score" : ""}
@@ -307,7 +327,7 @@ export default function Heatmap({ data }: { data: HeatmapResponse }) {
 
             {/* row labels */}
             {showRowLabels &&
-              data.row_labels.map((lab, ri) => (
+              rowLabels.map((lab, ri) => (
                 <text
                   key={ri}
                   x={gridLeft - 6}
@@ -351,7 +371,7 @@ export default function Heatmap({ data }: { data: HeatmapResponse }) {
               setHover({
                 x: e.clientX,
                 y: e.clientY,
-                lines: [`${data.row_labels[r]} · ${data.samples[c]}`, `value ${data.values[r][c].toFixed(2)}`, ...annoLines],
+                lines: [`${rowLabels[r]} · ${data.samples[c]}`, `value ${data.values[r][c].toFixed(2)}`, ...annoLines],
               });
             }}
             onMouseLeave={() => setHover(null)}

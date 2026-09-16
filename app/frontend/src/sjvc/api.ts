@@ -73,6 +73,9 @@ export interface ProjectionPoint {
   y: number;
   color: string;
   shape: string;
+  // true when this point is drawn grey — missing the selected clinical
+  // feature(s) — so it can be hidden without recomputing the projection.
+  missing: boolean;
   clinical: Record<string, string | number | null>;
 }
 
@@ -103,6 +106,11 @@ export interface HeatmapAnnotation {
 export interface HeatmapResponse {
   feature_kind: "junction" | "gene";
   row_labels: string[];
+  // "<gene name>:<novel-splicing-event type>" per row, from the cohort's
+  // junction metadata table — only present for a junction-level heatmap when
+  // that table was loaded; `null` per-row where the table has no gene
+  // annotation for that junction (fall back to `row_labels`/`row_ids` there).
+  row_labels_gene_type: (string | null)[] | null;
   row_ids: string[];
   samples: string[];
   values: number[][];

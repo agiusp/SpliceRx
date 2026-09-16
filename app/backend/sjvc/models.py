@@ -148,3 +148,8 @@ class HeatmapRequest(BaseModel):
     group_by: Optional[str] = None
     row_zscore: bool = True
     overrides: Dict[str, str] = {}
+    # drop samples missing any of `clinical`'s features before clustering,
+    # rather than showing them with a grey annotation cell — unlike the
+    # projection's equivalent toggle, this needs the heatmap rebuilt, since
+    # removing a column changes the clustering itself.
+    drop_missing_clinical: bool = False

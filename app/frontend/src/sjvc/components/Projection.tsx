@@ -11,11 +11,17 @@ const M = { top: 16, right: 16, bottom: 44, left: 52 };
 export default function Projection({ data }: { data: ProjectionResponse }) {
   const svgRef = useRef<SVGSVGElement>(null);
   const [hover, setHover] = useState<{ x: number; y: number; lines: string[] } | null>(null);
+  // Points the backend drew grey — missing the selected clinical feature(s).
+  // Hiding them is a pure display filter: the projection itself (computed
+  // from every sample) is unchanged, so no new request is made.
+  const [hideMissing, setHideMissing] = useState(false);
+  const nMissing = data.points.reduce((n, p) => n + (p.missing ? 1 : 0), 0);
+  const points = hideMissing ? data.points.filter((p) => !p.missing) : data.points;
 
-  const xs = data.points.map((p) => p.x);
-  const ys = data.points.map((p) => p.y);
-  const xScale = useMemo(() => linear(extent(xs), [M.left, W - M.right]), [data]);
-  const yScale = useMemo(() => linear(extent(ys), [H - M.bottom, M.top]), [data]);
+  const xs = points.map((p) => p.x);
+  const ys = points.map((p) => p.y);
+  const xScale = useMemo(() => linear(extent(xs), [M.left, W - M.right]), [points]);
+  const yScale = useMemo(() => linear(extent(ys), [H - M.bottom, M.top]), [points]);
 
   function download() {
     if (!svgRef.current) return;
@@ -41,8 +47,14 @@ export default function Projection({ data }: { data: ProjectionResponse }) {
         <button className="ghost" onClick={download}>
           Download SVG
         </button>
+        {nMissing > 0 && (
+          <label style={{ display: "flex", flexDirection: "row", alignItems: "center", gap: 6 }}>
+            <input type="checkbox" checked={hideMissing} onChange={(e) => setHideMissing(e.target.checked)} />
+            hide {nMissing} sample{nMissing === 1 ? "" : "s"} missing this data
+          </label>
+        )}
         <span className="chip">
-          {data.method.toUpperCase()} · {data.points.length} samples
+          {data.method.toUpperCase()} · {points.length} samples
           {data.explained_variance &&
             ` · PC${data.pc_x} + PC${data.pc_y} capture ${(
               (data.explained_variance[data.pc_x - 1] + data.explained_variance[data.pc_y - 1]) *
@@ -78,7 +90,7 @@ export default function Projection({ data }: { data: ProjectionResponse }) {
             {data.axis_labels[1]}
           </text>
 
-          {data.points.map((p) => {
+          {points.map((p) => {
             const cx = xScale(p.x);
             const cy = yScale(p.y);
             const lines = [

@@ -11,7 +11,7 @@ Stages:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Sequence
 
 import numpy as np
 
@@ -41,6 +41,24 @@ class FeatureMatrix:
 
     def label(self, feature_id: str) -> str:
         return self._gene_labels.get(feature_id, feature_id)
+
+
+def subset_samples(fm: FeatureMatrix, keep: Sequence[bool]) -> FeatureMatrix:
+    """A copy of `fm` restricted to the samples where `keep[i]` is True —
+    used by the heatmap route's "drop samples missing a selected clinical
+    feature" option, since (unlike the projection) a heatmap has to be
+    rebuilt to actually remove columns from the clustering. Rows/features are
+    untouched; only sample columns change."""
+    idx = [i for i, k in enumerate(keep) if k]
+    return FeatureMatrix(
+        kind=fm.kind,
+        feature_ids=list(fm.feature_ids),
+        samples=[fm.samples[i] for i in idx],
+        values=fm.values[:, idx],
+        n_junctions=fm.n_junctions,
+        dropped_zero_var=fm.dropped_zero_var,
+        _gene_labels=dict(fm._gene_labels),
+    )
 
 
 def select_and_maybe_condense(

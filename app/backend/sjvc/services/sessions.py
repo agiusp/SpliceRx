@@ -48,6 +48,9 @@ class Session:
     junction_gene_index: Optional[Any] = None  # services.junction_metadata.JunctionGeneIndex —
     #                                      the fast, no-GENCODE-needed gene lookup for a
     #                                      junction-level matrix (junction_counts / rrs_scores)
+    junction_type_index: Optional[Any] = None  # services.junction_type.JunctionTypeIndex —
+    #                                      "<gene name>:<novel-splicing-event type>" row labels
+    #                                      for the junction-level heatmap's alternate label view
     clinical: Optional[Any] = None       # services.clinical.Clinical
     annotation: Optional[Annotation] = None
     species: str = "human"

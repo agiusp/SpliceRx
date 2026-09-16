@@ -317,3 +317,57 @@ def test_heatmap_annotation_legends_alphabetical_and_distinct(client, ready_sess
                      json={"clinical": ["age", "tmb"], "order": "cluster"}).json()
     an = {t["feature"]: t for t in hn["annotations"]}
     assert an["age"]["stops"] != an["tmb"]["stops"]
+
+
+def _session_with_missing_clinical(client, tmp_path):
+    """Same cohort as `ready_session`, but s12's subtype is blank — a stand-in
+    for a real "this sample has no value for the selected clinical feature"
+    case, to exercise the missing-clinical toggle on projection/heatmap."""
+    sid = client.post("/api/session").json()["session_id"]
+    client.post(f"/api/session/{sid}/junctions",
+                files={"file": ("j.rds", open(FIXTURES / "mini_junctions.rds", "rb"))})
+    clinical_csv = tmp_path / "clinical_with_gap.csv"
+    lines = ["sample_id,subtype,age"]
+    lines += [f"s{i:02d},{'LUAD' if i <= 6 else 'LUSC'},{50 + i}" for i in range(1, 12)]
+    lines.append("s12,,62")  # missing subtype
+    clinical_csv.write_text("\n".join(lines) + "\n")
+    client.post(f"/api/session/{sid}/clinical", files={"file": ("c.csv", open(clinical_csv, "rb"))})
+    client.post(f"/api/session/{sid}/gtf", files={"file": ("mini.gtf", open(FIXTURES / "mini.gtf", "rb"))})
+    client.post(f"/api/session/{sid}/geneset", json={"mode": "typed", "text": "TESTG1, TESTG2, BOGUS"})
+    client.post(f"/api/session/{sid}/features", json={"condense": False})
+    return sid
+
+
+def test_projection_flags_missing_clinical_point(client, tmp_path):
+    sid = _session_with_missing_clinical(client, tmp_path)
+    p = client.post(f"/api/session/{sid}/projection",
+                     json={"method": "pca", "clinical": ["subtype"]}).json()
+    assert {pt["sample"] for pt in p["points"] if pt["missing"]} == {"s12"}
+    s12 = next(pt for pt in p["points"] if pt["sample"] == "s12")
+    assert s12["color"] == "#cfcfcf"
+    assert all(pt["color"] != "#cfcfcf" for pt in p["points"] if pt["sample"] != "s12")
+
+    # no clinical feature selected at all -> nothing reads as "missing"
+    p0 = client.post(f"/api/session/{sid}/projection", json={"method": "pca", "clinical": []}).json()
+    assert not any(pt["missing"] for pt in p0["points"])
+
+
+def test_heatmap_drop_missing_clinical(client, tmp_path):
+    sid = _session_with_missing_clinical(client, tmp_path)
+
+    kept = client.post(f"/api/session/{sid}/heatmap",
+                       json={"clinical": ["subtype"], "order": "cluster"}).json()
+    assert "s12" in kept["samples"]
+
+    dropped = client.post(f"/api/session/{sid}/heatmap",
+                          json={"clinical": ["subtype"], "order": "cluster",
+                                "drop_missing_clinical": True}).json()
+    assert "s12" not in dropped["samples"]
+    assert len(dropped["samples"]) == len(kept["samples"]) - 1
+    assert any("dropped 1" in w and "subtype" in w for w in dropped["warnings"])
+
+
+def test_heatmap_drop_missing_clinical_is_a_noop_with_no_feature_selected(client, ready_session):
+    h = client.post(f"/api/session/{ready_session}/heatmap",
+                    json={"clinical": [], "order": "cluster", "drop_missing_clinical": True}).json()
+    assert len(h["samples"]) == 12
