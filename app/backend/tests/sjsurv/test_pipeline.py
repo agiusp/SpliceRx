@@ -24,7 +24,9 @@ from sjsurv.services.metadata import (
     stratify,
 )
 from sjsurv.services.model import ModelError, cross_validate, train_full
-from sjsurv.services.select import Selection, SelectError, select_features
+from sjsurv.services.select import (
+    Selection, SelectError, rank_features, select_features, select_from_ranking,
+)
 from sjsurv.services.sjdat import Sjdat
 
 from .conftest import FIXTURES
@@ -71,6 +73,46 @@ def test_select_percent_threshold_and_errors():
     assert sel.n_features == 10
     with pytest.raises(SelectError):
         select_features(d, list(labels), n_min=999, x_min=0, top_n=10)
+
+
+def test_rank_features_reused_across_top_n_matches_one_shot():
+    # the split that lets a caller cache the ranking (e.g. a UI "top n"
+    # slider) and re-slice it must return exactly what the one-shot
+    # select_features(top_n=N) would, for every N, from a single ranking
+    d, labels = _synthetic_sjdat()
+    ranking = rank_features(d, list(labels), n_min=5, x_min=1)
+    for top_n in (1, 20, 10_000):
+        sliced = select_from_ranking(d, ranking, top_n)
+        one_shot = select_features(d, list(labels), n_min=5, x_min=1, top_n=top_n)
+        assert sliced.feature_ids == one_shot.feature_ids
+        assert np.array_equal(sliced.values, one_shot.values)
+
+
+def test_select_rrs_scores_ranks_by_variance_not_mad():
+    """RRS scores are bounded [0, 1] and mostly zero, so a row's median is
+    almost always exactly 0 and MAD collapses to (near-)0 for a row whose
+    only signal is a rare spike — plain variance still picks those up.
+    F0/F3 each have one large spike among mostly-zero entries (MAD 0, real
+    variance); F1 has a small, consistent spread with no spike (real MAD, but
+    the smallest variance of the three varying rows). Top-2 by MAD must
+    therefore differ from top-2 by variance, and kind="rrs_scores" must
+    select the variance ranking."""
+    values = np.array([
+        [0.0, 0.0, 0.0, 0.0, 0.0, 0.9],          # spike -> MAD 0, high variance
+        [0.10, 0.15, 0.05, 0.20, 0.10, 0.12],    # small consistent spread -> real MAD, low variance
+        [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],          # constant
+        [0.3, 0.3, 0.3, 0.3, 0.3, 0.9],          # spike on a nonzero baseline -> MAD 0, high variance
+    ])
+    samples = [f"s{i}" for i in range(6)]
+
+    d_gene = Sjdat(kind="gene_matrix", features=["F0", "F1", "F2", "F3"], samples=samples, values=values)
+    sel_mad = select_features(d_gene, samples, n_min=None, x_min=0, top_n=2)
+    assert "F1" in sel_mad.feature_ids   # the only row with nonzero MAD must be picked
+
+    d_rrs = Sjdat(kind="rrs_scores", features=["F0", "F1", "F2", "F3"], samples=samples, values=values)
+    sel_var = select_features(d_rrs, samples, n_min=None, x_min=0, top_n=2)
+    assert set(sel_var.feature_ids) == {"F0", "F3"}   # the two spikes, by variance
+    assert set(sel_var.feature_ids) != set(sel_mad.feature_ids)
 
 
 def test_cross_validate_beats_chance_on_planted_signal():
@@ -234,6 +276,142 @@ def test_pre_computed_survival_days_wins_over_raw_fallback(tmp_path):
     )
     raw = parse_raw_metadata(csv, tmp_path, ["S01"])
     assert raw.rows["S01"]["os"] == 1234.0
+
+
+def test_vital_status_parsed_into_event_flag(tmp_path):
+    """Dead -> event=True, Alive -> event=False, missing/unrecognised -> the
+    conservative event=True fallback; no vital-status column at all ->
+    event=True for everyone and RawMetadata.has_vital_status is False."""
+    csv = tmp_path / "vital.csv"
+    csv.write_text(
+        "sample_id,tcga.cgc_case_histological_diagnosis,tcga.cgc_case_pathologic_stage,"
+        "age_at_diagnosis_years,survival_days,tcga.cgc_case_vital_status\n"
+        "S01,Adenocarcinoma,Stage I,55,900,Dead\n"
+        "S02,Adenocarcinoma,Stage I,60,1800,Alive\n"
+        "S03,Adenocarcinoma,Stage I,65,300,\n"
+    )
+    raw = parse_raw_metadata(csv, tmp_path, ["S01", "S02", "S03"])
+    assert raw.has_vital_status is True
+    assert raw.rows["S01"]["event"] is True
+    assert raw.rows["S02"]["event"] is False
+    assert raw.rows["S03"]["event"] is True   # missing status -> conservative fallback
+
+    csv2 = tmp_path / "no_vital.csv"
+    csv2.write_text(
+        "sample_id,tcga.cgc_case_histological_diagnosis,tcga.cgc_case_pathologic_stage,"
+        "age_at_diagnosis_years,survival_days\n"
+        "S01,Adenocarcinoma,Stage I,55,900\n"
+    )
+    raw2 = parse_raw_metadata(csv2, tmp_path, ["S01"])
+    assert raw2.has_vital_status is False
+    assert raw2.rows["S01"]["event"] is True
+
+
+def test_stratify_uses_cox_median_and_leaves_early_censored_samples_unlabelled(tmp_path):
+    """The reported bug: a plain median of observed follow-up times treats a
+    still-living, early-censored sample as if its short observed time were
+    its true (Poor) survival. Six same-Group samples with a known Cox/KM
+    median survival of 40 (computed by hand and cross-checked against
+    lifelines directly): the naive np.median of the raw follow-up times
+    (10,20,30,40,50,60) would be 35, which would wrongly call the 30-day
+    censored sample "Poor". The Cox-based median must instead land on 40 (the
+    censoring at 30 and 50 pushes it later), and that 30-day censored sample
+    must come out unlabelled (None), not "Poor" — while a death at the same
+    observed time (or earlier) still correctly comes out "Poor"."""
+    csv = tmp_path / "censored_group.csv"
+    csv.write_text(
+        "sample_id,tcga.cgc_case_histological_diagnosis,tcga.cgc_case_pathologic_stage,"
+        "age_at_diagnosis_years,survival_days,tcga.cgc_case_vital_status\n"
+        "S01,Adenocarcinoma,Stage I,45,10,Dead\n"
+        "S02,Adenocarcinoma,Stage I,45,20,Dead\n"
+        "S03,Adenocarcinoma,Stage I,45,30,Alive\n"
+        "S04,Adenocarcinoma,Stage I,45,40,Dead\n"
+        "S05,Adenocarcinoma,Stage I,45,50,Alive\n"
+        "S06,Adenocarcinoma,Stage I,45,60,Dead\n"
+    )
+    samples = [f"S0{i}" for i in range(1, 7)]
+    raw = parse_raw_metadata(csv, tmp_path, samples)
+    md = stratify(raw, CLASSIC_AGE_BANDS, min_group_n=6)
+
+    rows = md.rows
+    group = rows["S01"]["group"]
+    assert all(rows[s]["group"] == group for s in samples)  # all one Group, as designed
+
+    assert rows["S01"]["surviver"] == "Poor"   # 10, Dead, below the median
+    assert rows["S02"]["surviver"] == "Poor"   # 20, Dead, below the median
+    assert rows["S03"]["surviver"] is None     # 30, Alive/censored, below the median -> unknown
+    assert rows["S04"]["surviver"] == "Good"   # 40, Dead, at the Cox-based median
+    assert rows["S05"]["surviver"] == "Good"   # 50, Alive/censored, past the median
+    assert rows["S06"]["surviver"] == "Good"   # 60, Dead, past the median
+
+    labelled = md.labelled_samples(ALL_GROUPS)
+    assert "S03" not in labelled
+    assert len(labelled) == 5
+
+
+def test_stratify_event_quantile_lowers_the_survival_threshold(tmp_path):
+    """Same 6-sample cohort as the Cox-median test above, but with
+    event_quantile=0.25 instead of the classic 0.5 median. Fewer deaths are
+    needed to define the threshold (1.5 of 6, effectively the 2nd death
+    time), so it lands much earlier — 20 instead of 40 (hand-computed and
+    cross-checked directly against lifelines) — which reaches a defined
+    threshold sooner for a low-mortality group and, here, leaves nobody
+    unlabelled even though two samples are censored."""
+    csv = tmp_path / "censored_group.csv"
+    csv.write_text(
+        "sample_id,tcga.cgc_case_histological_diagnosis,tcga.cgc_case_pathologic_stage,"
+        "age_at_diagnosis_years,survival_days,tcga.cgc_case_vital_status\n"
+        "S01,Adenocarcinoma,Stage I,45,10,Dead\n"
+        "S02,Adenocarcinoma,Stage I,45,20,Dead\n"
+        "S03,Adenocarcinoma,Stage I,45,30,Alive\n"
+        "S04,Adenocarcinoma,Stage I,45,40,Dead\n"
+        "S05,Adenocarcinoma,Stage I,45,50,Alive\n"
+        "S06,Adenocarcinoma,Stage I,45,60,Dead\n"
+    )
+    samples = [f"S0{i}" for i in range(1, 7)]
+    raw = parse_raw_metadata(csv, tmp_path, samples)
+    md = stratify(raw, CLASSIC_AGE_BANDS, min_group_n=6, event_quantile=0.25)
+
+    rows = md.rows
+    assert rows["S01"]["surviver"] == "Poor"   # 10, Dead, below the (now-earlier) threshold of 20
+    assert rows["S02"]["surviver"] == "Good"   # 20, Dead, at the threshold
+    assert rows["S03"]["surviver"] == "Good"   # 30, Alive, past the threshold
+    assert rows["S04"]["surviver"] == "Good"
+    assert rows["S05"]["surviver"] == "Good"
+    assert rows["S06"]["surviver"] == "Good"
+
+    labelled = md.labelled_samples(ALL_GROUPS)
+    assert len(labelled) == 6   # nobody unlabelled, unlike the 0.5-quantile case above
+
+
+def test_stratify_rejects_out_of_range_event_quantile(tmp_path):
+    raw = parse_raw_metadata(FIXTURES / "mini_metadata.csv", tmp_path, SAMPLES)
+    for bad in (0.0, 1.0, -0.1, 1.5):
+        with pytest.raises(StratifyError, match="event_quantile"):
+            stratify(raw, CLASSIC_AGE_BANDS, DEFAULT_MIN_GROUP_N, event_quantile=bad)
+
+
+def test_stratify_falls_back_to_plain_median_without_vital_status(tmp_path):
+    """No vital-status column at all -> every sample is treated as a
+    confirmed death (the pre-existing, non-censoring-aware behaviour), so the
+    Cox-based median collapses to the same value a plain median would give
+    and every sample gets a definite label — nobody is left unlabelled purely
+    because censoring information doesn't exist for this cohort."""
+    csv = tmp_path / "no_vital_group.csv"
+    csv.write_text(
+        "sample_id,tcga.cgc_case_histological_diagnosis,tcga.cgc_case_pathologic_stage,"
+        "age_at_diagnosis_years,survival_days\n"
+        + "\n".join(
+            f"S0{i},Adenocarcinoma,Stage I,45,{d}" for i, d in enumerate([10, 20, 30, 40, 50, 60], start=1)
+        )
+    )
+    samples = [f"S0{i}" for i in range(1, 7)]
+    raw = parse_raw_metadata(csv, tmp_path, samples)
+    assert raw.has_vital_status is False
+    md = stratify(raw, CLASSIC_AGE_BANDS, min_group_n=6)
+    labelled = md.labelled_samples(ALL_GROUPS)
+    assert len(labelled) == 6
+    assert set(labelled.values()) == {"Good", "Poor"}
 
 
 def test_rownames_column_used_as_sample_id_when_no_sample_id_column(tmp_path):

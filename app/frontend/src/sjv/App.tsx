@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { api, ApiError, type PlotResponse } from "./api";
+import { api, ApiError, type AnnotationSource, type PlotResponse } from "./api";
 import GeneInput from "./components/GeneInput";
 import Legend from "./components/Legend";
 import SeriesPicker, { type Series } from "./components/SeriesPicker";
@@ -16,7 +16,7 @@ interface Props {
 export default function App({ sessionId, reloadNonce }: Props) {
   const [samples, setSamples] = useState<string[]>([]);
   const [metaColumns, setMetaColumns] = useState<string[]>([]);
-  const [loadedInfo, setLoadedInfo] = useState<{ rds?: string; ann?: string }>({});
+  const [loadedInfo, setLoadedInfo] = useState<{ rds?: string; ann?: string; jmeta?: string }>({});
   const [series, setSeries] = useState<Series>({
     mode: "sample",
     sample: "",
@@ -31,6 +31,13 @@ export default function App({ sessionId, reloadNonce }: Props) {
   const [drawing, setDrawing] = useState(false);
   const [minReads, setMinReads] = useState(0);
   const [lastGenes, setLastGenes] = useState<string[] | null>(null);
+  // How each arc's category is decided: live against the loaded GENCODE
+  // transcript models ("gencode", the long-standing behaviour), or from the
+  // cohort's own junction-metadata table's recount3/STAR-aligner `annotated`
+  // column, when loaded ("metadata") — falling back to "gencode" per-arc for
+  // any junction the table has no row for.
+  const [annotationSource, setAnnotationSource] = useState<AnnotationSource>("gencode");
+  const [hasJunctionMetadata, setHasJunctionMetadata] = useState(false);
 
   const wrapRef = useRef<HTMLDivElement>(null);
   const [width, setWidth] = useState(1000);
@@ -45,6 +52,14 @@ export default function App({ sessionId, reloadNonce }: Props) {
         // GENCODE reference is set on the Data tab, independently of the matrix
         if (st.gencode_label) setAnnotationReady(true);
         setLoadedInfo((li) => ({ ...li, ann: st.gencode_label ?? li.ann }));
+        setHasJunctionMetadata(st.has_junction_metadata);
+        if (!st.has_junction_metadata) setAnnotationSource("gencode");
+        setLoadedInfo((li) => ({
+          ...li,
+          jmeta: st.has_junction_metadata
+            ? `loaded${st.junction_metadata_has_detail ? "" : " (no left/right site detail)"}`
+            : undefined,
+        }));
         if (!st.has_rds) return;
         setSamples(st.samples);
         setSeries((prev) => ({ ...prev, sample: prev.sample || st.samples[0] || "" }));
@@ -73,14 +88,14 @@ export default function App({ sessionId, reloadNonce }: Props) {
         ? { sample: series.sample }
         : null;
 
-  async function draw(genes: string[], cutoff = minReads) {
+  async function draw(genes: string[], cutoff = minReads, source = annotationSource) {
     if (!sessionId || !seriesSel || genes.length === 0) return;
     setDrawing(true);
     setError(null);
     setNearMatches([]);
     setLastGenes(genes);
     try {
-      const p = await api.plot(sessionId, seriesSel, genes, cutoff);
+      const p = await api.plot(sessionId, seriesSel, genes, cutoff, source);
       setPlot(p);
       setWarnings(p.warnings);
     } catch (e) {
@@ -106,6 +121,14 @@ export default function App({ sessionId, reloadNonce }: Props) {
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [minReads]);
+
+  // re-draw immediately (no debounce — it's a discrete choice, not typing)
+  // when the annotation source changes
+  useEffect(() => {
+    if (!plot || !lastGenes) return;
+    draw(lastGenes, minReads, annotationSource);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [annotationSource]);
 
   return (
     <div className="app" ref={wrapRef}>
@@ -147,6 +170,41 @@ export default function App({ sessionId, reloadNonce }: Props) {
               onChange={(e) => setMinReads(Math.max(0, Number(e.target.value) || 0))}
             />
           </label>
+        </div>
+        <div className="row" style={{ marginTop: 8 }}>
+          <fieldset style={{ border: "none", padding: 0, margin: 0 }}>
+            <legend className="muted" style={{ fontSize: 13, padding: 0 }}>
+              Junction annotation
+            </legend>
+            <label style={{ flexDirection: "row", alignItems: "center", gap: 6, display: "flex" }}>
+              <input
+                type="radio"
+                name="annotation-source"
+                checked={annotationSource === "gencode"}
+                onChange={() => setAnnotationSource("gencode")}
+              />
+              Computed live from GENCODE
+            </label>
+            <label style={{ flexDirection: "row", alignItems: "center", gap: 6, display: "flex" }}>
+              <input
+                type="radio"
+                name="annotation-source"
+                checked={annotationSource === "metadata"}
+                disabled={!hasJunctionMetadata}
+                onChange={() => setAnnotationSource("metadata")}
+              />
+              "Annotated" column from the junction metadata table (STAR/recount3)
+            </label>
+          </fieldset>
+          <span className="muted" style={{ maxWidth: 460 }}>
+            {hasJunctionMetadata
+              ? "The loaded table's own annotated/left_annotated/right_annotated columns — from " +
+                "the aligner that originally called these junctions — take precedence over the " +
+                "live per-gene GENCODE classification below; a junction missing from the table " +
+                "falls back to it."
+              : "Load the cohort's junction metadata table (TCGA_<cohort>_junction_metadata.rds) " +
+                "on the Data tab to enable this."}
+          </span>
         </div>
         {!annotationReady && (
           <div className="muted" style={{ marginTop: 8 }}>

@@ -13,6 +13,17 @@ export interface SessionState {
   sparse: boolean;
   sample_metadata_columns: string[];
   gencode_label: string | null;
+  has_junction_metadata: boolean;
+  junction_metadata_has_detail: boolean;
+}
+
+export type AnnotationSource = "gencode" | "metadata";
+
+export interface JunctionMetadataLoaded {
+  n_rows: number;
+  n_duplicate_rownames: number;
+  has_annotation_detail: boolean;
+  warnings: string[];
 }
 
 export interface GeneRecord {
@@ -45,6 +56,7 @@ export interface ArcModel {
   count: number;
   height: number;
   category: string;
+  category_source: AnnotationSource;
 }
 
 export interface LegendEntry {
@@ -62,6 +74,7 @@ export interface PlotResponse {
   legend: LegendEntry[];
   series_label: string;
   count_kind: "count" | "median";
+  annotation_source: AnnotationSource;
   warnings: string[];
 }
 
@@ -148,6 +161,12 @@ export const api = {
     return j(await fetch(`/api/sjv/session/${sid}/sample-metadata`, { method: "POST", body: fd }));
   },
 
+  async uploadJunctionMetadata(sid: string, file: File): Promise<JunctionMetadataLoaded> {
+    const fd = new FormData();
+    fd.append("file", file);
+    return j(await fetch(`/api/sjv/session/${sid}/junction-metadata`, { method: "POST", body: fd }));
+  },
+
   async stratValues(sid: string, column: string): Promise<StratValue[]> {
     const d = await j<{ values: StratValue[] }>(
       await fetch(`/api/sjv/session/${sid}/sample-metadata/values?column=${encodeURIComponent(column)}`),
@@ -160,12 +179,13 @@ export const api = {
     series: { sample?: string; strat_column?: string; strat_value?: string },
     genes: string[],
     min_reads = 0,
+    annotation_source: AnnotationSource = "gencode",
   ): Promise<PlotResponse> {
     return j(
       await fetch(`/api/sjv/session/${sid}/plot`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ ...series, genes, min_reads }),
+        body: JSON.stringify({ ...series, genes, min_reads, annotation_source }),
       }),
     );
   },

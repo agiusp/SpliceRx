@@ -43,12 +43,18 @@ export default function Heatmap({ data }: { data: HeatmapResponse }) {
   const colDendH = data.col_dendro ? DENDRO : 0;
   const annoH = data.annotations.length * (ANNO_H + 2);
   const showRowLabels = !compact && nRows <= MAX_LABEL_ROWS && cellH >= 7;
-  const showColLabels = cellW >= 6 && !(compact && nCols > 40);
   const labelW = showRowLabels ? LABEL_W : data.annotations.length ? 84 : 10;
-  const gridLeft = rowDendW + labelW;
+  // Feature labels sit immediately left of the grid; the feature dendrogram
+  // (if any) is pushed to the grid's right instead of the more conventional
+  // left, so the labels stay flush against the axis they annotate and read
+  // top-to-bottom without a dendrogram gap in between. Sample ids are never
+  // drawn under the grid — a wide cohort made them illegible anyway, and the
+  // per-cell hover tooltip already names the sample.
+  const gridLeft = labelW;
   const gridTop = colDendH + annoH + 4;
   const gridW = colX(nCols);
   const gridH = rowY(nRows);
+  const rowDendLeft = gridLeft + gridW;
 
   const [vmin, vmax] = useMemo(() => {
     let lo = Infinity;
@@ -97,14 +103,14 @@ export default function Heatmap({ data }: { data: HeatmapResponse }) {
         const depth = (ys[i] / maxD) * (DENDRO - 4);
         return kind === "col"
           ? `${gridLeft + along},${colDendH - depth}`
-          : `${rowDendW - depth},${gridTop + along}`;
+          : `${rowDendLeft + depth},${gridTop + along}`;
       });
       return `M${pts.join("L")}`;
     });
   }
 
-  const totalW = gridLeft + gridW + 8;
-  const totalH = gridTop + gridH + (showColLabels ? 60 : 8);
+  const totalW = gridLeft + gridW + rowDendW + 8;
+  const totalH = gridTop + gridH + 8;
 
   // --- export ------------------------------------------------------------- //
   function themeColors() {
@@ -338,23 +344,6 @@ export default function Heatmap({ data }: { data: HeatmapResponse }) {
                   fillOpacity={0.8}
                 >
                   {lab}
-                </text>
-              ))}
-
-            {/* column labels */}
-            {showColLabels &&
-              data.samples.map((s, ci) => (
-                <text
-                  key={s}
-                  x={gridLeft + ci * cellW + cellW / 2}
-                  y={gridTop + gridH + 12}
-                  textAnchor="end"
-                  fontSize={10}
-                  fill="currentColor"
-                  fillOpacity={0.7}
-                  transform={`rotate(-60 ${gridLeft + ci * cellW + cellW / 2} ${gridTop + gridH + 12})`}
-                >
-                  {s}
                 </text>
               ))}
           </svg>

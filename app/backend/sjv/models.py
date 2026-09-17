@@ -1,7 +1,7 @@
 """Pydantic response/request schemas for the API."""
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import List, Literal, Optional
 
 from pydantic import BaseModel, model_validator
 
@@ -27,6 +27,8 @@ class SessionState(BaseModel):
     sparse: bool = False
     sample_metadata_columns: List[str] = []
     gencode_label: Optional[str] = None
+    has_junction_metadata: bool = False
+    junction_metadata_has_detail: bool = False
 
 
 class ReleasesResponse(BaseModel):
@@ -82,6 +84,15 @@ class StratValuesResponse(BaseModel):
     values: List[StratValue]
 
 
+class JunctionMetadataLoaded(BaseModel):
+    n_rows: int
+    n_duplicate_rownames: int
+    has_annotation_detail: bool  # left_annotated/right_annotated columns were present —
+    # without them, a junction the table doesn't call "annotated" can't be split into
+    # exon_skipping/alt_5p/alt_3p/novel_exon/novel and just reads "novel"
+    warnings: List[str] = []
+
+
 class PlotRequest(BaseModel):
     genes: List[str] = []           # one or more gene names; the plot spans them all
     gene_name: Optional[str] = None  # legacy single-gene field, still accepted
@@ -90,6 +101,13 @@ class PlotRequest(BaseModel):
     strat_value: Optional[str] = None
     min_reads: float = 0.0  # a junction is drawn only if its count (or group
     #                         median) is >= this; 0 draws every non-zero junction
+    # "gencode" (default): classify every arc live against the loaded GENCODE
+    # transcript models for the query gene(s) — see services/classify.py.
+    # "metadata": prefer the cohort's own junction-metadata table (the
+    # recount3/STAR-aligner `annotated` column prepTCGAdata carries alongside
+    # the junction counts) when it's loaded, falling back to the GENCODE
+    # classification for any arc the table has no row for.
+    annotation_source: Literal["gencode", "metadata"] = "gencode"
 
     @model_validator(mode="after")
     def _validate(self) -> "PlotRequest":
@@ -134,6 +152,11 @@ class ArcModel(BaseModel):
     count: float
     height: float
     category: str
+    # which source actually produced `category` for this arc — normally
+    # matches the request's `annotation_source`, except in "metadata" mode
+    # when this junction has no row in the loaded table and the live GENCODE
+    # classification was used as a fallback instead
+    category_source: Literal["gencode", "metadata"] = "gencode"
 
 
 class LegendEntry(BaseModel):
@@ -156,4 +179,5 @@ class PlotResponse(BaseModel):
     legend: List[LegendEntry]
     series_label: str = ""       # sample id, or "<group> (median of N)"
     count_kind: str = "count"    # "count" or "median"
+    annotation_source: Literal["gencode", "metadata"] = "gencode"
     warnings: List[str] = []

@@ -15,7 +15,8 @@ being fixed at download time:
    all, it's built from days-to-death (deceased) / days-to-last-follow-up
    (censored) instead.
 2. ``stratify`` derives, for a chosen set of age bands and a minimum group
-   size, exactly what `surv_cohort()` used to:
+   size, what `surv_cohort()` used to plus a proper accounting for
+   right-censoring that it never did:
 
    * ``Histology``       — copy of the histological-diagnosis column, with
      any user-chosen merges applied (see `histology_map`), or dropped from
@@ -28,10 +29,38 @@ being fixed at download time:
      `"Stage | Age_at_diagnosis"` with histology dropped), or `None` when any
      remaining component is `None`.
    * ``MedianSurvival``   — for every `Group` with at least `min_group_n`
-     samples, the median `survival_days` over that group.
-   * ``SurviverGroup``    — `"Good"` when a sample's own survival is at least
-     its group's `MedianSurvival`, `"Poor"` otherwise, `None` where the group
-     has no `MedianSurvival`.
+     samples, the group's median survival time estimated from a *stratified
+     Cox proportional-hazards model* (one call to `lifelines.CoxPHFitter`
+     across every qualifying group at once, `strata=["Group"]`, no other
+     covariates — with nothing to regress on this reduces to each group's own
+     Breslow-estimated baseline survival curve, the Cox-model analogue of a
+     Kaplan-Meier curve), not a plain median of observed follow-up times. That
+     distinction matters whenever a group's longest survivors are still alive
+     (censored) rather than dead: a plain median of raw follow-up days is
+     biased low in that case, since a censored sample's *observed* time
+     under-states its true (unknown, but at-least-this-long) survival. A
+     group whose survival curve never drops to 0.5 within its observed
+     follow-up (fewer than half its members have died) has no defined median
+     and, like a group below `min_group_n`, gets no labels. The 0.5 split
+     point itself is configurable (`stratify`'s `event_quantile`) — a
+     low-mortality cohort can lower it (e.g. to 0.25, "died before 25% of the
+     group had died") so a threshold is reached for more groups, at the cost
+     of a more lopsided split.
+   * ``SurviverGroup``    — `"Good"` when a sample's own observed follow-up
+     time is at least its group's Cox-estimated `MedianSurvival` (true
+     regardless of whether that follow-up ended in death or is still
+     ongoing); `"Poor"` when it is shorter *and* the sample is a confirmed
+     death (vital status "Dead") before that point; and `None` (unlabelled,
+     not forced to "Poor") when it is shorter but the sample was last known
+     alive — its eventual outcome relative to the group median is genuinely
+     unknown, and mislabelling a still-living, merely-early-censored patient
+     "Poor" is exactly the bias this Cox-based approach exists to remove.
+     Vital status is read from the metadata file's own vital-status column
+     (see `_VITAL_STATUS_ALIASES`); a sample with no recognisable vital
+     status — or every sample, when the file carries no vital-status column
+     at all — is conservatively treated as a confirmed death (the same
+     "every observed time is a real event" assumption this module used
+     unconditionally before censoring was accounted for).
 
 `AgeBands` defaults to the classic fixed cut points `(30-50], (50-70], (>70)`
 (ages of 30 or under are left unbanded — i.e. excluded from `Group`, exactly as
@@ -50,6 +79,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
+from lifelines import CoxPHFitter
 
 from sjvc.services.rds import MatrixError, read_table
 
@@ -103,6 +133,21 @@ _DAYS_TO_LAST_FOLLOWUP_ALIASES = (
     "tcga.xml_days_to_last_followup",
     "tcga.xml_days_to_last_known_alive",
 )
+# Whether a sample is a confirmed death (an "event", in survival-analysis
+# terms) or was last known alive ("censored" — its true survival is at least
+# this long, but unknown beyond that) — needed to compute a group's median
+# survival properly (see `_cox_group_medians`) instead of naively treating
+# every observed follow-up time as if it were a death. Several equivalent
+# columns exist across TCGA download vintages; the most complete one present
+# is used, same pattern as age/survival-time above.
+_VITAL_STATUS_ALIASES = (
+    "vital_status",
+    "tcga.gdc_cases.diagnoses.vital_status",
+    "tcga.cgc_case_vital_status",
+    "tcga.cgc_follow_up_vital_status",
+    "tcga.xml_vital_status",
+)
+_ALIVE_VALUES = {"alive", "living"}
 _LEGACY_DERIVED_COLS = {"histology", "stage", "age_at_diagnosis", "group", "survivergroup", "mediansurvival"}
 _MISSING = {"", "nan", "none", "na", "n/a", "null"}
 _ABC_SUFFIX = re.compile(r"[abcd][0-9]?$")
@@ -110,7 +155,16 @@ _ABC_SUFFIX = re.compile(r"[abcd][0-9]?$")
 # by default (with Stage / Age At Diagnosis / Histology) — same pattern
 # dataload/scan.py uses to spot an `*_MSI.rds` file, applied here to a column
 # name instead of a filename.
-_MSI_COL = re.compile(r"(^|[_.\-])msi([_.\-]|$)", re.I)
+_MSI_COL = re.compile(r"(^|[_.\-])(msi(sensor)?|mantis)([_.\-]|$)", re.I)
+
+
+def _looks_like_identifier_col(col: str) -> bool:
+    """A column whose name is itself an id/uuid/barcode segment (`sample_id`,
+    `tcga.gdc_file_id`, a joined table's own `msi.sample_id`, ...) — never a
+    useful covariate, and if offered, a categorical one one-hots into nearly
+    as many columns as there are samples."""
+    segments = re.split(r"[_.\-]+", col.lower())
+    return any(seg in ("id", "ids", "uuid", "barcode") for seg in segments)
 
 
 class MetadataError(ValueError):
@@ -161,7 +215,10 @@ class CovariateColumn:
 @dataclass
 class RawMetadata:
     # sample_id -> {"histology": str|None, "stage_raw": str|None,
-    #               "age": float|None, "os": float|None}
+    #               "age": float|None, "os": float|None, "event": bool}
+    # "event" is True for a confirmed death, False for a sample last known
+    # alive (censored) — see _event_value(); always True when the file has no
+    # recognisable vital-status column at all.
     rows: Dict[str, Dict[str, object]]
     n_unmatched: int = 0
     # every other column in the sample-metadata file (i.e. not the id column,
@@ -171,6 +228,11 @@ class RawMetadata:
     # offers alongside the three specials below.
     covariate_table: Dict[str, Dict[str, object]] = field(default_factory=dict)
     covariate_columns: List[str] = field(default_factory=list)  # in file order
+    # whether a recognisable vital-status column was found at all — when
+    # False, every sample's "event" above is the True-by-default fallback,
+    # so the Cox-based MedianSurvival below is not actually censoring-
+    # adjusted for this file (surfaced as a warning by the caller).
+    has_vital_status: bool = False
 
     @property
     def n_rows(self) -> int:
@@ -223,11 +285,17 @@ class RawMetadata:
             ),
         ]
         for col in self.covariate_columns:
+            if _looks_like_identifier_col(col):
+                continue
             present = [row.get(col) for row in self.covariate_table.values() if not _is_missing(row.get(col))]
             if not present:
                 continue
             n_numeric = sum(1 for v in present if _to_float(v) is not None)
             kind = "numeric" if n_numeric >= max(1, round(0.9 * len(present))) else "categorical"
+            if kind == "categorical":
+                n_distinct = len({str(v) for v in present})
+                if n_distinct > max(20, round(0.5 * len(present))):
+                    continue  # near-unique per sample — free-text/id-like, not a usable covariate
             out.append(CovariateColumn(
                 key=col, label=_prettify_col(col), kind=kind, n_available=len(present),
                 default=bool(_MSI_COL.search(col)),
@@ -252,18 +320,35 @@ def _find_col(cols: Dict[str, str], aliases: Sequence[str]) -> Optional[str]:
     )
 
 
-def _most_complete_col(df: pd.DataFrame, cols: Dict[str, str], aliases: Sequence[str]) -> Optional[str]:
+def _most_complete_col(
+    df: pd.DataFrame, cols: Dict[str, str], aliases: Sequence[str],
+    *, usable=lambda v: _to_float(v) is not None,
+) -> Optional[str]:
     """Among the given aliases that are present, the one with the most usable
-    (non-missing, numeric) values — unlike _find_col, not just the first one
-    present. Different TCGA cohort downloads expose different subsets of the
-    equivalent fields, and a present column isn't necessarily a populated
-    one."""
+    values — unlike _find_col, not just the first one present. Different TCGA
+    cohort downloads expose different subsets of the equivalent fields, and a
+    present column isn't necessarily a populated one. `usable` decides what
+    counts as a populated cell — the default (parseable as a float) suits the
+    numeric age/survival-time columns; pass `lambda v: not _is_missing(v)` for
+    a categorical column such as vital status."""
     present = [cols[a] for a in aliases if a in cols and a not in _LEGACY_DERIVED_COLS]
     if not present:
         return None
     if len(present) == 1:
         return present[0]
-    return max(present, key=lambda c: sum(1 for v in df[c] if _to_float(v) is not None))
+    return max(present, key=lambda c: sum(1 for v in df[c] if usable(v)))
+
+
+def _event_value(v: object) -> bool:
+    """Whether a vital-status cell means a confirmed death (an "event") for
+    survival-analysis purposes. Anything not recognisably "alive" — missing,
+    "Dead", "Deceased", or an unexpected value — is conservatively treated as
+    a death: the whole point of tracking vital status is to stop treating a
+    still-living, early-censored sample as if it were a death, and that only
+    works by erring toward "event" whenever status is otherwise unknown,
+    exactly the assumption this module made unconditionally before censoring
+    was accounted for."""
+    return not (not _is_missing(v) and str(v).strip().lower() in _ALIVE_VALUES)
 
 
 def parse_raw_metadata(path: Path, tmp_dir: Path, known_samples: Sequence[str]) -> RawMetadata:
@@ -290,6 +375,9 @@ def parse_raw_metadata(path: Path, tmp_dir: Path, known_samples: Sequence[str]) 
         # alias comment above for why these two are picked separately)
         death_col = _most_complete_col(df, cols, _DAYS_TO_DEATH_ALIASES)
         fu_col = _most_complete_col(df, cols, _DAYS_TO_LAST_FOLLOWUP_ALIASES)
+    vital_col = _most_complete_col(
+        df, cols, _VITAL_STATUS_ALIASES, usable=lambda v: not _is_missing(v),
+    )
 
     missing = [
         label for label, c in (
@@ -322,11 +410,14 @@ def parse_raw_metadata(path: Path, tmp_dir: Path, known_samples: Sequence[str]) 
 
     # every other column is a covariate candidate — never the id column, never
     # histology/stage/age (already exposed as the Histology/Stage/Age At
-    # Diagnosis specials), and never a survival-time column (os_col /
-    # death_col / fu_col): that's the exact quantity SurviverGroup is split
-    # on, and offering it as a covariate would let the classifier "predict"
-    # the label for free instead of testing the molecular data.
-    _excluded_cov_cols = {c for c in (id_col, hist_col, stage_col, age_col, os_col, death_col, fu_col) if c}
+    # Diagnosis specials), and never a survival-time or vital-status column
+    # (os_col / death_col / fu_col / vital_col): those are exactly the
+    # quantities SurviverGroup is computed from, and offering them as a
+    # covariate would let the classifier "predict" the label for free instead
+    # of testing the molecular data.
+    _excluded_cov_cols = {
+        c for c in (id_col, hist_col, stage_col, age_col, os_col, death_col, fu_col, vital_col) if c
+    }
     covariate_columns = [
         str(c) for c in df.columns
         if str(c) not in _excluded_cov_cols and str(c).strip().lower() not in _LEGACY_DERIVED_COLS
@@ -349,6 +440,7 @@ def parse_raw_metadata(path: Path, tmp_dir: Path, known_samples: Sequence[str]) 
             "stage_raw": None if _is_missing(r[stage_col]) else str(r[stage_col]).strip(),
             "age": _to_float(r[age_col]),
             "os": _os_value(r),
+            "event": _event_value(r[vital_col]) if vital_col is not None else True,
         }
         covariate_table[sid] = {c: r[c] for c in covariate_columns}
 
@@ -357,7 +449,7 @@ def parse_raw_metadata(path: Path, tmp_dir: Path, known_samples: Sequence[str]) 
             "no `sample_id` in the metadata matched a column of the sjdat matrix"
         )
     return RawMetadata(
-        rows=rows, n_unmatched=n_unmatched,
+        rows=rows, n_unmatched=n_unmatched, has_vital_status=vital_col is not None,
         covariate_table=covariate_table, covariate_columns=covariate_columns,
     )
 
@@ -540,6 +632,7 @@ def stratify(
     *,
     use_histology: bool = True,
     histology_map: Optional[Dict[str, str]] = None,
+    event_quantile: float = 0.5,
 ) -> Metadata:
     """`use_histology=False` drops histology from Group entirely (Group
     becomes just Stage | age band, and a sample no longer needs a histology
@@ -548,9 +641,22 @@ def stratify(
     `histology_map` (raw value -> merged label) folds selected histology
     values together before they go into Group, e.g. several closely-related
     subtypes that are individually too small; values not present in the map
-    are used as-is."""
+    are used as-is.
+
+    `event_quantile` is the fraction of a group that must have died for its
+    Cox-estimated survival-time threshold (`MedianSurvival`) to be defined —
+    0.5 is the classic median. A low-mortality cohort's 50% threshold can go
+    unreached for most groups within their observed follow-up (a `None`
+    result from `_cox_group_survival_quantile_times`, same as a group too
+    small to fit at all); lowering this toward, say, 0.25 reaches a defined
+    threshold sooner (fewer deaths needed to define it), at the cost of a
+    more lopsided Good/Poor split — "Poor" then means "died unusually early
+    relative to the rest of the group," not "died before the halfway point."
+    """
     if min_group_n < 1:
         raise StratifyError("min_group_n must be >= 1")
+    if not (0.0 < event_quantile < 1.0):
+        raise StratifyError("event_quantile must be strictly between 0 and 1")
 
     sample_ids = list(raw.rows)
     age_band = bin_ages([raw.rows[s]["age"] for s in sample_ids], age_bands)
@@ -568,30 +674,79 @@ def stratify(
         group.append(None if (h is None or st is None or ab is None) else f"{h} | {st} | {ab}")
 
     os_vals = [raw.rows[s]["os"] for s in sample_ids]
+    event_vals = [raw.rows[s]["event"] for s in sample_ids]
     by_group: Dict[str, List[int]] = {}
     for i, g in enumerate(group):
         if g is not None:
             by_group.setdefault(g, []).append(i)
 
-    median_survival: List[Optional[float]] = [None] * len(sample_ids)
-    for idxs in by_group.values():
-        if len(idxs) < min_group_n:
-            continue
-        vals = [os_vals[i] for i in idxs if os_vals[i] is not None]
-        if not vals:
-            continue
-        m = float(np.median(vals))
-        for i in idxs:
-            median_survival[i] = m
+    # Cox-based survival-quantile threshold per qualifying group (>=
+    # min_group_n members, regardless of how many actually have a usable os
+    # value — same gate the old plain-median code used) — one stratified fit
+    # across every such group at once, see _cox_group_survival_quantile_times().
+    fit_rows: List[Tuple[float, bool, str]] = [
+        (os_vals[i], event_vals[i], g)
+        for g, idxs in by_group.items() if len(idxs) >= min_group_n
+        for i in idxs if os_vals[i] is not None
+    ]
+    medians_by_group = _cox_group_survival_quantile_times(fit_rows, event_quantile)
+
+    median_survival: List[Optional[float]] = [
+        medians_by_group.get(g) if g is not None else None for g in group
+    ]
 
     rows: Dict[str, Dict[str, object]] = {}
     for i, s in enumerate(sample_ids):
         surviver = None
         if median_survival[i] is not None and os_vals[i] is not None:
-            surviver = "Good" if os_vals[i] >= median_survival[i] else "Poor"
+            if os_vals[i] >= median_survival[i]:
+                surviver = "Good"
+            elif event_vals[i]:
+                surviver = "Poor"
+            # else: shorter than the group median, but last known alive
+            # (censored) — genuinely unknown whether they'd have reached it,
+            # so left unlabelled rather than forced to "Poor"
         rows[s] = {"group": group[i], "surviver": surviver}
 
     return Metadata(rows=rows, n_unmatched=raw.n_unmatched)
+
+
+def _cox_group_survival_quantile_times(
+    rows: List[Tuple[float, bool, str]], event_quantile: float = 0.5,
+) -> Dict[str, Optional[float]]:
+    """Per-group survival-time threshold, adjusted for right-censoring, from
+    one stratified Cox proportional-hazards fit (`lifelines.CoxPHFitter`,
+    `strata=["group"]`, no other covariates) across every `(duration, event,
+    group)` triple given. With no covariates to regress on, this reduces to
+    each group's own Breslow-estimated baseline survival curve — the
+    Cox-model analogue of a Kaplan-Meier curve — read off at the first time
+    point where survival drops to `1 - event_quantile` or below (the classic
+    median is `event_quantile=0.5`, i.e. survival <= 0.5). A group whose
+    curve never reaches that level within its observed follow-up (fewer than
+    `event_quantile` of its members have died) has no defined threshold and
+    is simply absent from the result, same as if it had been dropped from
+    `rows` entirely."""
+    if not rows:
+        return {}
+    survival_threshold = 1.0 - event_quantile
+    df = pd.DataFrame(rows, columns=["duration", "event", "group"])
+    try:
+        cph = CoxPHFitter()
+        cph.fit(df, duration_col="duration", event_col="event", strata=["group"])
+        baseline_survival = cph.baseline_survival_
+    except Exception:
+        # a genuinely degenerate input (e.g. every duration identical and
+        # non-positive) — no thresholds rather than a hard failure; the
+        # caller already only invokes this on data that passed min_group_n,
+        # so this is a rare defensive fallback, not the expected path
+        return {}
+    out: Dict[str, Optional[float]] = {}
+    for g in df["group"].unique():
+        if g not in baseline_survival.columns:
+            continue
+        below = baseline_survival[g][baseline_survival[g] <= survival_threshold]
+        out[g] = float(below.index[0]) if not below.empty else None
+    return out
 
 
 # --------------------------------------------------------------------------- #

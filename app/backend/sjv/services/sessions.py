@@ -12,7 +12,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
 from .gencode import Annotation
 from .groups import SampleMetadata
@@ -31,6 +31,12 @@ class Session:
     rds: Optional[RdsMatrix] = None
     annotation: Optional[Annotation] = None
     metadata: Optional[SampleMetadata] = None
+    # sjlookup.services.lookup.JunctionLookupIndex — the cohort's
+    # prepTCGAdata/recount3 junction-metadata table, keyed by "chr:start-end:
+    # strand", when loaded. Lets the sashimi plot classify each arc from the
+    # recount3/STAR-aligner "annotated" column instead of (or as a fallback
+    # alongside) live GENCODE transcript matching — see PlotRequest.annotation_source.
+    junction_lookup: Optional[Any] = None
 
     def touch(self) -> None:
         self.last_seen = time.time()

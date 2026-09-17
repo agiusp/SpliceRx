@@ -37,7 +37,7 @@ from ..services.junction_metadata import JunctionMetadataError, load_junction_ge
 from ..services.junction_type import load_junction_type_index
 from ..services.junctions import gene_name_of_label, looks_gene_level, map_junctions_to_genes
 from ..services.rds import MatrixError
-from ..services.sjdat import SJDAT_KINDS, SJDAT_META, SjdatError, load_sjdat
+from ..services.sjdat import SJDAT_KINDS, SJDAT_META, SjdatError, load_sjdat, rows_with_min_supporting_reads
 from ..services.sessions import store
 
 router = APIRouter()
@@ -568,16 +568,44 @@ def build_features_mad(sid: str, body: MadFeaturesRequest) -> FeaturesResponse:
         raise HTTPException(422, "top_n must be >= 1")
 
     restrict_to = None
-    if body.protein_coding_only:
+    exclude_set = None
+    if body.protein_coding_only or body.exclude_paralog_families:
         if s.annotation is None:
             raise HTTPException(
-                409, "select a GENCODE release or upload a GTF to filter to protein-coding genes"
+                409, "select a GENCODE release or upload a GTF to filter to protein-coding / "
+                     "paralog-family genes"
             )
-        if not s.annotation.has_gene_types():
+        if body.protein_coding_only:
+            if not s.annotation.has_gene_types():
+                raise HTTPException(
+                    422, "the selected reference has no gene_type / biotype attributes to filter on"
+                )
+            restrict_to = {
+                n for n in s.annotation.gene_names_of_type("protein_coding") if not n.startswith("mt-")
+            }
+        if body.exclude_paralog_families:
+            exclude_set = s.annotation.paralog_family_names()
+
+    only_rownames = None
+    if body.min_supporting_reads is not None:
+        if s.active_sjdat != "rrs_scores":
             raise HTTPException(
-                422, "the selected reference has no gene_type / biotype attributes to filter on"
+                422, "the minimum-supporting-read-count filter only applies to the RRS scores matrix"
             )
-        restrict_to = s.annotation.gene_names_of_type("protein_coding")
+        jc = s.sjdat.get("junction_counts")
+        if jc is None:
+            raise HTTPException(
+                409, "load the junction counts matrix (Data tab) alongside RRS scores to use the "
+                     "minimum-supporting-read-count filter"
+            )
+        only_rownames = rows_with_min_supporting_reads(
+            s.junctions.features, jc, s.junctions.samples, body.min_supporting_reads,
+        )
+        if not only_rownames:
+            raise HTTPException(
+                422, f"no junction has a corresponding junction-counts row with max supporting "
+                     f"reads > {body.min_supporting_reads:g} — lower it, or turn it off"
+            )
 
     try:
         if body.condense:
@@ -585,10 +613,30 @@ def build_features_mad(sid: str, body: MadFeaturesRequest) -> FeaturesResponse:
                 raise HTTPException(409, "select a GENCODE release or upload a GTF first")
             fm = mad_mod.top_genes_by_mad(s.junctions, s.annotation, body.top_n)
         else:
-            fm = mad_mod.top_features_by_mad(
-                s.junctions, body.top_n, restrict_to=restrict_to,
-                n_min=body.n_min, x_min=body.x_min, annotation=s.annotation,
+            # Ranking (gene-overlap resolution + the per-row MAD/variance
+            # computation) is the expensive step and is entirely independent
+            # of `top_n` — cache it, keyed on everything else that affects
+            # it, so dragging the "top n" slider back and forth just
+            # re-slices the same ranking instead of recomputing it from
+            # scratch each time (identity-based: any reload/reactivation
+            # swaps in a new object, which naturally changes the key and
+            # invalidates the cache).
+            jc_for_key = s.sjdat.get("junction_counts") if body.min_supporting_reads is not None else None
+            rank_key = (
+                id(s.junctions), body.protein_coding_only, body.exclude_paralog_families,
+                id(s.annotation), body.min_supporting_reads, id(jc_for_key),
+                body.n_min, body.x_min,
             )
+            if s.rank_cache is not None and s.rank_cache[0] == rank_key:
+                ranking = s.rank_cache[1]
+            else:
+                ranking = mad_mod.rank_by_mad(
+                    s.junctions, restrict_to=restrict_to, exclude=exclude_set,
+                    only_rownames=only_rownames, n_min=body.n_min, x_min=body.x_min,
+                    annotation=s.annotation,
+                )
+                s.rank_cache = (rank_key, ranking)
+            fm = mad_mod.features_from_ranking(s.junctions, ranking, body.top_n)
     except ValueError as e:
         raise HTTPException(422, str(e))
 
@@ -602,15 +650,34 @@ def build_features_mad(sid: str, body: MadFeaturesRequest) -> FeaturesResponse:
                 1 for f in s.junctions.features if gene_name_of_label(f).strip().lower() in restrict_to
             )
             warnings.append(
-                f"{n_coding} of {len(s.junctions.features)} matrix genes are protein-coding "
-                f"in the reference — ranked those"
+                f"{n_coding} of {len(s.junctions.features)} matrix genes are protein-coding, "
+                f"non-MT in the reference — ranked those"
             )
         else:
-            warnings.append("restricted ranking to junctions overlapping a protein-coding gene in the reference")
+            warnings.append(
+                "restricted ranking to junctions overlapping a protein-coding, non-MT gene in the reference"
+            )
+    if exclude_set:
+        warnings.append(
+            "excluded genes in the curated low-mappability paralog-family list (HLA, "
+            "immunoglobulin/TCR, MT-*, olfactory receptors, and other named segmental-"
+            "duplication clusters)"
+        )
+    if only_rownames is not None:
+        warnings.append(
+            f"restricted ranking to junctions with a max supporting read count > "
+            f"{body.min_supporting_reads:g} in the junction counts matrix "
+            f"({len(only_rownames):,} qualify)"
+        )
     if fm.n_features < body.top_n:
         warnings.append(
             f"only {fm.n_features} feature(s) have any variability (nonzero MAD) — asked for "
             f"top {body.top_n}"
+        )
+    if s.active_sjdat == "rrs_scores":
+        warnings.append(
+            "RRS scores: ranked by variance rather than MAD, which suits this bounded, mostly-"
+            "zero score better (see \"Top by Var\")"
         )
     return FeaturesResponse(
         feature_kind=fm.kind,

@@ -21,6 +21,11 @@ interface Props {
   onModeChange: (mode: GeneSetMode) => void;
   onTopNChange: (n: number) => void;
   onCodingOnlyChange: (v: boolean) => void;
+  /** Exclude genes in the curated low-mappability paralog-family list (HLA,
+   *  immunoglobulin/TCR, MT-*, olfactory receptors, and other named
+   *  segmental-duplication clusters) — independent of, and combinable with,
+   *  the protein-coding-only radio above it. */
+  onExcludeParalogsChange: (v: boolean) => void;
   /** N / X — the coverage prefilter, only meaningful (and only shown here)
    *  for a junction-level sjdat (junction counts / RRS scores). Owned by the
    *  parent so it survives a tab switch. */
@@ -32,6 +37,12 @@ interface Props {
    *  (non-null) for pathway_matrix. Seeds "top n by MAD" the first time the
    *  matrix becomes active. */
   nNonzeroRows: number | null;
+  /** Whether the junction_counts sjdat is also loaded in this session — the
+   *  RRS min-supporting-reads filter needs it to look up each RRS
+   *  junction's corresponding raw read count. */
+  junctionCountsLoaded: boolean;
+  minSupportingReads: number | null;
+  onMinSupportingReadsChange: (n: number | null) => void;
 }
 
 export default function GeneSetPanel({
@@ -45,11 +56,15 @@ export default function GeneSetPanel({
   onModeChange,
   onTopNChange,
   onCodingOnlyChange,
+  onExcludeParalogsChange,
   nMin,
   xMin,
   onNMinChange,
   onXMinChange,
   nNonzeroRows,
+  junctionCountsLoaded,
+  minSupportingReads,
+  onMinSupportingReadsChange,
 }: Props) {
   // A gene-level matrix (row names are gene symbols): typed / list / pathway
   // select rows by matching those names directly, no GENCODE resolution —
@@ -67,6 +82,12 @@ export default function GeneSetPanel({
   const [tab, setTab] = useState<GeneSetMode>("typed");
   const noun = pathwayMatrixOnly ? "pathways" : geneLevel ? "genes" : "splice junctions";
   const where = geneLevel ? "the matrix" : fastLookupEnabled ? "the junction metadata" : "the reference";
+  // RRS scores are bounded [0, 1] and mostly zero, so a row's median is
+  // almost always exactly 0 and MAD collapses to (near-)0 for most rows —
+  // variance ranks them better; MAD still suits count-like gene/pathway
+  // data with a few strong outliers.
+  const rankAbbr = activeSjdat === "rrs_scores" ? "Var" : "MAD";
+  const rankStat = activeSjdat === "rrs_scores" ? "variance" : "median absolute deviation";
   const [text, setText] = useState("");
   const [prefix, setPrefix] = useState(false);
   const [libraries, setLibraries] = useState<string[]>([]);
@@ -74,6 +95,11 @@ export default function GeneSetPanel({
   const [term, setTerm] = useState<{ term: string; n_genes: number } | null>(null);
   const [topN, setTopN] = useState(50);
   const [codingOnly, setCodingOnly] = useState(false);
+  const [excludeParalogs, setExcludeParalogs] = useState(false);
+  // RRS scores only — filters junctions to those whose corresponding row in
+  // the (separately loaded) junction_counts matrix has a max supporting read
+  // count above this value.
+  const isRrs = activeSjdat === "rrs_scores";
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [result, setResult] = useState<{ matched: string[]; unmatched: string[]; warnings: string[] } | null>(null);
@@ -146,6 +172,19 @@ export default function GeneSetPanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [codingOnly]);
 
+  useEffect(() => {
+    onExcludeParalogsChange(excludeParalogs);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [excludeParalogs]);
+
+  // the min-supporting-reads filter is meaningless outside RRS scores —
+  // clear it when the active matrix changes away from RRS so a stale value
+  // doesn't silently apply if the user switches back to it later on genes
+  useEffect(() => {
+    if (!isRrs) onMinSupportingReadsChange(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeSjdat]);
+
   // Genes are resolved first; building the feature matrix (junctions -> genes)
   // always happens right after.
   async function buildFeatures() {
@@ -214,7 +253,7 @@ export default function GeneSetPanel({
           Pathway
         </button>
         <button className={tab === "mad" ? "active" : ""} onClick={() => setTab("mad")}>
-          Top by MAD
+          Top by {rankAbbr}
         </button>
       </div>
 
@@ -331,8 +370,7 @@ export default function GeneSetPanel({
           {showCoverage && (
             <p className="muted" style={{ marginTop: 0, fontSize: 13 }}>
               A feature is a candidate only when at least <b>N</b> of the samples have a non-zero
-              entry that is also <b>≥ X</b>; of those, the top <b>n</b> by median absolute
-              deviation are used.
+              entry that is also <b>≥ X</b>; of those, the top <b>n</b> by {rankStat} are used.
             </p>
           )}
           <div className="row">
@@ -363,7 +401,7 @@ export default function GeneSetPanel({
               </>
             )}
             <label>
-              Number of top {noun} (by MAD)
+              Number of top {noun} (by {rankAbbr})
               <input
                 type="number"
                 min={1}
@@ -374,7 +412,7 @@ export default function GeneSetPanel({
             </label>
             <span className="muted" style={{ maxWidth: 420 }}>
               Ranks every {pathwayMatrixOnly ? "pathway" : geneLevel ? "gene" : "splice junction"} in
-              the matrix by descending median absolute deviation
+              the matrix by descending {rankStat}
               {pathwayMatrixOnly && nNonzeroRows != null
                 ? ` — defaults to all ${nNonzeroRows} with a non-zero value`
                 : ""}
@@ -389,14 +427,60 @@ export default function GeneSetPanel({
               </label>
               <label style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
                 <input type="radio" checked={codingOnly} onChange={() => setCodingOnly(true)} />
-                {geneLevel ? "Protein-coding genes only" : "Junctions of protein-coding genes only"}
+                {geneLevel
+                  ? "Protein-coding, non-MT genes only"
+                  : "Junctions of protein-coding, non-MT genes only"}
               </label>
               <span className="muted" style={{ maxWidth: 360 }}>
-                Uses the selected GENCODE reference’s gene biotypes
+                Uses the selected GENCODE reference’s gene biotypes, excluding MT-* genes
                 {geneLevel
                   ? ""
                   : " — a live reference is needed even when the junction metadata table is loaded, since that table doesn't carry biotypes"}
                 .
+              </span>
+            </div>
+          )}
+          {!pathwayMatrixOnly && (
+            <div className="row" style={{ marginTop: 8 }}>
+              <label style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+                <input
+                  type="checkbox"
+                  checked={excludeParalogs}
+                  onChange={(e) => setExcludeParalogs(e.target.checked)}
+                />
+                Exclude low-mappability paralog gene families
+              </label>
+              <span className="muted" style={{ maxWidth: 400 }}>
+                HLA, immunoglobulin/TCR loci, MT-*, olfactory receptors, and other named
+                segmental-duplication clusters known to multi-map — independent of, and combinable
+                with, the protein-coding option above. Also uses the GENCODE reference.
+              </span>
+            </div>
+          )}
+          {isRrs && (
+            <div className="row" style={{ marginTop: 8 }}>
+              <label style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+                <input
+                  type="checkbox"
+                  checked={minSupportingReads != null}
+                  disabled={!junctionCountsLoaded}
+                  onChange={(e) => onMinSupportingReadsChange(e.target.checked ? 0 : null)}
+                />
+                Max supporting read count &gt;
+                <input
+                  type="number"
+                  min={0}
+                  step={1}
+                  disabled={!junctionCountsLoaded || minSupportingReads == null}
+                  value={minSupportingReads ?? 0}
+                  style={{ width: 90 }}
+                  onChange={(e) => onMinSupportingReadsChange(Math.max(0, Number(e.target.value) || 0))}
+                />
+              </label>
+              <span className="muted" style={{ maxWidth: 400 }}>
+                {junctionCountsLoaded
+                  ? "Keeps an RRS junction only when its corresponding row in the loaded junction counts matrix has a max read count above this, across the matrix's samples."
+                  : "Load the junction counts matrix (Data tab) alongside RRS scores to enable this filter."}
               </span>
             </div>
           )}

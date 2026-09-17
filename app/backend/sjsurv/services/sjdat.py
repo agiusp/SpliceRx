@@ -11,4 +11,5 @@ from sjvc.services.sjdat import (  # noqa: F401 (re-exported)
     Sjdat,
     SjdatError,
     load_sjdat,
+    rows_with_min_supporting_reads,
 )

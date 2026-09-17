@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { ExonModel, PlotResponse, TranscriptModel } from "../api";
 import { arcApex, arcPath, chevronXs } from "../plot/arcs";
 import { categoryColor, CATEGORY_LABELS } from "../plot/palette";
@@ -38,7 +38,41 @@ export default function SashimiPlot({ plot, width }: { plot: PlotResponse; width
   const [collapsed, setCollapsed] = useState(true);
   const [fit, setFit] = useState(true);
   const [zoom, setZoom] = useState(1);
-  const [hover, setHover] = useState<{ x: number; y: number; text: string[] } | null>(null);
+  const [hover, setHover] = useState<{ x: number; y: number; text: string[]; junctionId: string } | null>(
+    null,
+  );
+  const [copied, setCopied] = useState(false);
+  // A hover tooltip is normally `pointer-events: none` so it never steals the
+  // mousemove that keeps it positioned/visible — but that also makes it
+  // unclickable. This one needs to be clickable (to copy the junction id), so
+  // hiding it can no longer be a plain "mouse left the arc" — the cursor's
+  // very next pixel of travel toward the tooltip does that. Instead, leaving
+  // the arc (or the tooltip) only *schedules* a hide a moment later, and
+  // entering the other one of the pair cancels it — the standard debounced
+  // "interactive tooltip" pattern.
+  const hideTimer = useRef<number | null>(null);
+  function cancelHide() {
+    if (hideTimer.current != null) {
+      window.clearTimeout(hideTimer.current);
+      hideTimer.current = null;
+    }
+  }
+  function scheduleHide() {
+    cancelHide();
+    hideTimer.current = window.setTimeout(() => setHover(null), 150);
+  }
+  useEffect(() => cancelHide, []);
+
+  async function copyJunctionId(id: string) {
+    try {
+      await navigator.clipboard.writeText(id);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1500);
+    } catch {
+      // clipboard access denied/unavailable — the id is still shown in the
+      // tooltip for the user to select and copy by hand
+    }
+  }
 
   const multiGene = plot.genes.length > 1;
 
@@ -161,7 +195,6 @@ export default function SashimiPlot({ plot, width }: { plot: PlotResponse; width
           viewBox={`0 0 ${innerW} ${height}`}
           xmlns="http://www.w3.org/2000/svg"
           style={{ display: "block", fontFamily: "system-ui, sans-serif" }}
-          onMouseLeave={() => setHover(null)}
         >
           {/* alignment guides */}
           {guideXs.map((gx, i) => (
@@ -188,6 +221,11 @@ export default function SashimiPlot({ plot, width }: { plot: PlotResponse; width
               a.id,
               `${plot.count_kind === "median" ? "median" : "count"} ${a.count.toLocaleString("en-US")}`,
               CATEGORY_LABELS[a.category] ?? a.category,
+              // in metadata mode, flag the arcs that had no row in the table
+              // and fell back to the live GENCODE classification instead
+              ...(plot.annotation_source === "metadata" && a.category_source === "gencode"
+                ? ["(not in junction metadata — from GENCODE)"]
+                : []),
             ];
             return (
               <g key={a.id}>
@@ -198,8 +236,13 @@ export default function SashimiPlot({ plot, width }: { plot: PlotResponse; width
                   strokeWidth={ARC_STROKE}
                   strokeLinecap="round"
                   opacity={0.9}
-                  onMouseMove={(e) => setHover({ x: e.clientX, y: e.clientY, text: tip })}
-                  onMouseLeave={() => setHover(null)}
+                  style={{ cursor: "pointer" }}
+                  onMouseMove={(e) => {
+                    cancelHide();
+                    setHover({ x: e.clientX, y: e.clientY, text: tip, junctionId: a.id });
+                  }}
+                  onMouseLeave={scheduleHide}
+                  onClick={() => copyJunctionId(a.id)}
                 />
                 {topArc && a.id === topArc.id ? (
                   <text
@@ -281,15 +324,23 @@ export default function SashimiPlot({ plot, width }: { plot: PlotResponse; width
             );
           })}
         </svg>
-      </div>
 
-      {hover && (
-        <div className="tooltip" style={{ left: hover.x + 12, top: hover.y + 12 }}>
-          {hover.text.map((line, i) => (
-            <div key={i}>{line}</div>
-          ))}
-        </div>
-      )}
+        {hover && (
+          <div
+            className="tooltip"
+            style={{ left: hover.x + 12, top: hover.y + 12, pointerEvents: "auto", cursor: "pointer" }}
+            onClick={() => copyJunctionId(hover.junctionId)}
+            onMouseEnter={cancelHide}
+            onMouseLeave={scheduleHide}
+            title="Click to copy this junction's chr:start-end:strand — paste it into SJ Lookup"
+          >
+            {hover.text.map((line, i) => (
+              <div key={i}>{line}</div>
+            ))}
+            <div style={{ opacity: 0.75, marginTop: 3 }}>{copied ? "copied!" : "click to copy"}</div>
+          </div>
+        )}
+      </div>
     </div>
   );
 }

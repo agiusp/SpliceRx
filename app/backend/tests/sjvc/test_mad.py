@@ -4,7 +4,7 @@ import pytest
 from tests.sjvc.conftest import FIXTURES
 
 from sjvc.services.gencode import annotation_from_gtf
-from sjvc.services.mad import top_features_by_mad, top_genes_by_mad
+from sjvc.services.mad import features_from_ranking, rank_by_mad, top_features_by_mad, top_genes_by_mad
 from sjvc.services.rds import Matrix, load_matrix
 
 
@@ -29,6 +29,19 @@ def test_top_junctions_ranks_by_mad_descending(tmp_path):
     assert set(fm.feature_ids) == set(ranked[:3])
 
 
+def test_rank_by_mad_reused_across_top_n_matches_one_shot(tmp_path):
+    # the split that lets a caller cache the ranking (e.g. a UI "top n"
+    # slider) and re-slice it must return exactly what the one-shot
+    # top_features_by_mad(top_n=N) would, for every N, from a single ranking
+    m = _matrix(tmp_path)
+    ranking = rank_by_mad(m)
+    for top_n in (1, 3, 5, 10_000):
+        sliced = features_from_ranking(m, ranking, top_n)
+        one_shot = top_features_by_mad(m, top_n=top_n)
+        assert sliced.feature_ids == one_shot.feature_ids
+        assert np.array_equal(sliced.values, one_shot.values, equal_nan=True)
+
+
 def test_top_junctions_caps_at_available_rows(tmp_path):
     m = _matrix(tmp_path)
     fm = top_features_by_mad(m, top_n=10_000)
@@ -44,6 +57,37 @@ def test_top_features_on_already_condensed_matrix_ranks_every_row(tmp_path):
     assert fm.kind == "gene" and fm.n_features == 3
     assert fm.n_junctions == 0
     assert set(fm.feature_ids).issubset(set(m.features))
+
+
+def test_rrs_scores_rank_by_variance_not_mad():
+    """RRS scores are bounded [0, 1] and mostly zero, so a row's median is
+    almost always exactly 0 and MAD (robust to a minority of outliers)
+    collapses to (near-)0 for rows whose only signal is a rare spike — plain
+    variance still picks those up. GENE0/GENE3 each have one large spike
+    among mostly-zero entries (MAD == 0, real variance); GENE1 has a small,
+    consistent spread with no outlier (real MAD, but the smallest variance of
+    the three varying rows). Requesting the top 2 by MAD must therefore
+    differ from the top 2 by variance, and `matrix.kind == "rrs_scores"` must
+    select the variance ranking."""
+    values = np.array([
+        [0.0, 0.0, 0.0, 0.0, 0.0, 0.9],   # spike -> MAD 0, high variance
+        [0.10, 0.15, 0.05, 0.20, 0.10, 0.12],  # small consistent spread -> real MAD, low variance
+        [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],   # constant -> excluded either way
+        [0.3, 0.3, 0.3, 0.3, 0.3, 0.9],   # spike on a nonzero baseline -> MAD 0, high variance
+    ])
+    m = Matrix(
+        samples=[f"s{i}" for i in range(6)],
+        features=["GENE0", "GENE1", "GENE2", "GENE3"],
+        values=values,
+    )
+
+    fm_mad = top_features_by_mad(m, top_n=2)
+    assert "GENE1" in fm_mad.feature_ids   # the only row with nonzero MAD must be picked
+
+    m.kind = "rrs_scores"
+    fm_var = top_features_by_mad(m, top_n=2)
+    assert set(fm_var.feature_ids) == {"GENE0", "GENE3"}   # the two spikes, by variance
+    assert set(fm_var.feature_ids) != set(fm_mad.feature_ids)
 
 
 def test_top_features_excludes_constant_rows_rather_than_padding_top_n():

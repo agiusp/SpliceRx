@@ -48,9 +48,9 @@ from ..services.metadata import (
     quantile_age_bands,
     stratify,
 )
-from ..services.select import SelectError, select_features, select_from_features
+from ..services.select import SelectError, rank_features, select_from_features, select_from_ranking
 from ..services.sessions import SJDAT_KINDS, store
-from ..services.sjdat import SJDAT_META, SjdatError, load_sjdat
+from ..services.sjdat import SJDAT_META, SjdatError, load_sjdat, rows_with_min_supporting_reads
 
 # Gene-set resolution reuses sjvc's services directly — SJSurv's active sjdat
 # matrix is a `sjvc.services.sjdat.Sjdat`, a deliberate drop-in replacement
@@ -173,6 +173,12 @@ def ingest_metadata(s, src: Path) -> MetadataLoaded:
         )
     if not known:
         warnings.append("no sjdat matrix loaded yet — every metadata row was kept")
+    if not raw.has_vital_status:
+        warnings.append(
+            "no vital-status (Alive/Dead) column found — every sample is treated as a confirmed "
+            "death, so each group's median survival is not actually censoring-adjusted for this "
+            "cohort (see the Group/Age-Band panel)"
+        )
     for kind, raw_d in s.sjdat_raw.items():
         n_excluded = raw_d.n_samples - s.sjdat[kind].n_samples
         if n_excluded:
@@ -188,16 +194,19 @@ def ingest_metadata(s, src: Path) -> MetadataLoaded:
 def _apply_stratification(
     s, age_bands: AgeBands, min_group_n: int,
     *, use_histology: bool = True, histology_map: dict | None = None,
+    event_quantile: float = 0.5,
 ) -> None:
     histology_map = histology_map or {}
     s.metadata = stratify(
         s.raw_metadata, age_bands, min_group_n,
         use_histology=use_histology, histology_map=histology_map,
+        event_quantile=event_quantile,
     )
     s.age_bands = age_bands
     s.min_group_n = min_group_n
     s.use_histology = use_histology
     s.histology_map = histology_map
+    s.event_quantile = event_quantile
     # the Group / SurviverGroup definitions just changed under it
     s.selection = s.model = s.labels = s.selected_group = None
 
@@ -221,6 +230,8 @@ def _metadata_loaded(s, warnings: List[str]) -> MetadataLoaded:
         histology_counts=[HistologyCountOut(value=v, n=n) for v, n in raw.histology_counts()],
         use_histology=s.use_histology,
         histology_map=s.histology_map,
+        event_quantile=s.event_quantile,
+        has_vital_status=raw.has_vital_status,
         warnings=warnings,
     )
 
@@ -357,6 +368,8 @@ def stratify_route(sid: str, body: StratifyRequest) -> MetadataLoaded:
         raise HTTPException(409, "load the sample metadata on the Data tab first")
     if body.min_group_n < 1:
         raise HTTPException(422, "min_group_n must be >= 1")
+    if not (0.0 < body.event_quantile < 1.0):
+        raise HTTPException(422, "event_quantile must be strictly between 0 and 1")
 
     edges = [float("inf") if e is None else float(e) for e in body.edges]
     try:
@@ -367,6 +380,7 @@ def stratify_route(sid: str, body: StratifyRequest) -> MetadataLoaded:
     _apply_stratification(
         s, bands, body.min_group_n,
         use_histology=body.use_histology, histology_map=body.histology_map,
+        event_quantile=body.event_quantile,
     )
     return _metadata_loaded(s, [])
 
@@ -633,23 +647,71 @@ def select(sid: str, body: SelectRequest) -> SelectResponse:
         raise HTTPException(422, f"no Good/Poor-labelled sample in group {body.group!r}")
 
     restrict_to = None
-    if body.protein_coding_only:
+    exclude_set = None
+    if body.protein_coding_only or body.exclude_paralog_families:
         if s.annotation is None:
             raise HTTPException(
-                409, "select a GENCODE release or upload a GTF to filter to protein-coding genes"
+                409, "select a GENCODE release or upload a GTF to filter to protein-coding / "
+                     "paralog-family genes"
             )
-        if not s.annotation.has_gene_types():
-            raise HTTPException(
-                422, "the selected reference has no gene_type / biotype attributes to filter on"
-            )
-        restrict_to = s.annotation.gene_names_of_type("protein_coding")
+        if body.protein_coding_only:
+            if not s.annotation.has_gene_types():
+                raise HTTPException(
+                    422, "the selected reference has no gene_type / biotype attributes to filter on"
+                )
+            restrict_to = {
+                n for n in s.annotation.gene_names_of_type("protein_coding") if not n.startswith("mt-")
+            }
+        if body.exclude_paralog_families:
+            exclude_set = s.annotation.paralog_family_names()
 
     sample_ids = [sid_ for sid_ in labels if sid_ in d._col]
-    try:
-        sel = select_features(
-            d, sample_ids, n_min=body.n_min, x_min=body.x_min, top_n=body.top_n,
-            restrict_to=restrict_to, annotation=s.annotation,
+
+    only_rownames = None
+    if body.min_supporting_reads is not None:
+        if s.active_sjdat != "rrs_scores":
+            raise HTTPException(
+                422, "the minimum-supporting-read-count filter only applies to the RRS scores matrix"
+            )
+        jc = s.sjdat.get("junction_counts")
+        if jc is None:
+            raise HTTPException(
+                409, "load the junction counts matrix (Data tab) alongside RRS scores to use the "
+                     "minimum-supporting-read-count filter"
+            )
+        only_rownames = rows_with_min_supporting_reads(
+            d.features, jc, sample_ids, body.min_supporting_reads,
         )
+        if not only_rownames:
+            raise HTTPException(
+                422, f"no junction has a corresponding junction-counts row with max supporting "
+                     f"reads > {body.min_supporting_reads:g} in this group — lower it, or turn it off"
+            )
+
+    # Ranking a group's features (gene-overlap resolution + the per-row MAD/
+    # variance computation) is the expensive step and is entirely independent
+    # of `top_n` — cache it, keyed on everything else that affects it, so
+    # dragging the "top n" slider back and forth just re-slices the same
+    # ranking instead of recomputing it from scratch each time (identity-
+    # based: any reload/restratify/reactivation swaps in a new object, which
+    # naturally changes the key and invalidates the cache).
+    jc_for_key = s.sjdat.get("junction_counts") if body.min_supporting_reads is not None else None
+    rank_key = (
+        id(d), id(s.metadata), body.group, body.n_min, body.x_min,
+        body.protein_coding_only, body.exclude_paralog_families, id(s.annotation),
+        body.min_supporting_reads, id(jc_for_key),
+    )
+    try:
+        if s.rank_cache is not None and s.rank_cache[0] == rank_key:
+            ranking = s.rank_cache[1]
+        else:
+            ranking = rank_features(
+                d, sample_ids, n_min=body.n_min, x_min=body.x_min,
+                restrict_to=restrict_to, exclude=exclude_set, only_rownames=only_rownames,
+                annotation=s.annotation,
+            )
+            s.rank_cache = (rank_key, ranking)
+        sel = select_from_ranking(d, ranking, body.top_n)
     except SelectError as e:
         raise HTTPException(422, str(e))
 
@@ -665,9 +727,26 @@ def select(sid: str, body: SelectRequest) -> SelectResponse:
     warnings: List[str] = []
     if restrict_to is not None:
         warnings.append(
-            "restricted ranking to protein-coding genes"
+            "restricted ranking to protein-coding, non-MT genes"
             if looks_gene_level(d.features)
-            else "restricted ranking to junctions overlapping a protein-coding gene in the reference"
+            else "restricted ranking to junctions overlapping a protein-coding, non-MT gene in the reference"
+        )
+    if exclude_set:
+        warnings.append(
+            "excluded genes in the curated low-mappability paralog-family list (HLA, "
+            "immunoglobulin/TCR, MT-*, olfactory receptors, and other named segmental-"
+            "duplication clusters)"
+        )
+    if only_rownames is not None:
+        warnings.append(
+            f"restricted ranking to junctions with a max supporting read count > "
+            f"{body.min_supporting_reads:g} in the junction counts matrix "
+            f"({len(only_rownames):,} qualify)"
+        )
+    if s.active_sjdat == "rrs_scores":
+        warnings.append(
+            "RRS scores: ranked by variance rather than MAD, which suits this bounded, mostly-"
+            "zero score better (see \"Top by Var\")"
         )
     dropped = len(labels) - len(sel.sample_ids) if len(labels) > len(sel.sample_ids) else 0
     if dropped:

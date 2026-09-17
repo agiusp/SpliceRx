@@ -55,8 +55,10 @@ export default function App({ sessionId, reloadNonce }: Props) {
   const [geneSetMode, setGeneSetMode] = useState<GeneSetMode>("typed");
   const [madTopN, setMadTopN] = useState(50);
   const [madCodingOnly, setMadCodingOnly] = useState(false);
+  const [madExcludeParalogs, setMadExcludeParalogs] = useState(false);
   const [madNMin, setMadNMin] = useState(0.2);
   const [madXMin, setMadXMin] = useState(1);
+  const [madMinSupportingReads, setMadMinSupportingReads] = useState<number | null>(null);
   const [madBusy, setMadBusy] = useState(false);
   const [madErr, setMadErr] = useState<string | null>(null);
 
@@ -134,7 +136,7 @@ export default function App({ sessionId, reloadNonce }: Props) {
   useEffect(() => {
     if (geneSetMode === "mad") setFeatures(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [madTopN, madCodingOnly, madNMin, madXMin]);
+  }, [madTopN, madCodingOnly, madExcludeParalogs, madNMin, madXMin, madMinSupportingReads]);
 
   // clamp selection for projection
   useEffect(() => {
@@ -159,6 +161,7 @@ export default function App({ sessionId, reloadNonce }: Props) {
       const f = await api.buildFeaturesMad(
         sid, madTopN, madCodingOnly,
         showCoverage ? madNMin : null, showCoverage ? madXMin : 0,
+        madExcludeParalogs, activeSjdat === "rrs_scores" ? madMinSupportingReads : null,
       );
       setFeatures(f);
     } catch (e) {
@@ -263,11 +266,15 @@ export default function App({ sessionId, reloadNonce }: Props) {
             onModeChange={setGeneSetMode}
             onTopNChange={setMadTopN}
             onCodingOnlyChange={setMadCodingOnly}
+            onExcludeParalogsChange={setMadExcludeParalogs}
             nMin={madNMin}
             xMin={madXMin}
             onNMinChange={setMadNMin}
             onXMinChange={setMadXMin}
             nNonzeroRows={sjdatOptions.find((o) => o.kind === "pathway_matrix")?.n_nonzero_rows ?? null}
+            junctionCountsLoaded={!!sjdatOptions.find((o) => o.kind === "junction_counts")?.loaded}
+            minSupportingReads={madMinSupportingReads}
+            onMinSupportingReadsChange={setMadMinSupportingReads}
           />
         </Panel>
       )}
@@ -282,7 +289,7 @@ export default function App({ sessionId, reloadNonce }: Props) {
         </div>
 
         {geneSetMode === "mad" && (() => {
-          const needsRef = madCodingOnly && !gencodeLabel;
+          const needsRef = (madCodingOnly || madExcludeParalogs) && !gencodeLabel;
           return (
             <div className="row" style={{ marginTop: 10 }}>
               <button disabled={madBusy || madTopN < 1 || needsRef} onClick={runMad}>
@@ -290,13 +297,13 @@ export default function App({ sessionId, reloadNonce }: Props) {
                 {activeSjdat === "pathway_matrix"
                   ? "pathways"
                   : matrixKind === "gene"
-                    ? madCodingOnly ? "protein-coding genes" : "genes"
-                    : madCodingOnly ? "junctions (protein-coding genes)" : "junctions"}{" "}
-                by MAD
+                    ? madCodingOnly ? "protein-coding, non-MT genes" : "genes"
+                    : madCodingOnly ? "junctions (protein-coding, non-MT genes)" : "junctions"}{" "}
+                by {activeSjdat === "rrs_scores" ? "Var" : "MAD"}
               </button>
               {madBusy && <span className="muted">computing…</span>}
               {needsRef && (
-                <span className="muted">choose a GENCODE reference on the Data tab to filter to protein-coding genes</span>
+                <span className="muted">choose a GENCODE reference on the Data tab to filter to protein-coding / paralog-family genes</span>
               )}
             </div>
           );

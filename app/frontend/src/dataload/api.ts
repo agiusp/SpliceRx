@@ -93,6 +93,8 @@ export const dataloadApi = {
     j<MatrixLoaded>(post(`/api/dataload/sjv/${sid}/junctions`, { path })),
   loadSampleMetadata: (sid: string, path: string) =>
     j<ColumnsLoaded>(post(`/api/dataload/sjv/${sid}/sample-metadata`, { path })),
+  loadSjvJunctionMetadata: (sid: string, path: string) =>
+    j<SjvJunctionMetadataLoaded>(post(`/api/dataload/sjv/${sid}/junction-metadata`, { path })),
 
   // SJSurv (survivor groups)
   loadSjsurvSjdat: (sid: string, kind: string, path: string) =>
@@ -137,6 +139,13 @@ export interface JunctionMetadataLoaded {
 export interface SjlookupJunctionMetadataLoaded {
   n_rows: number;
   n_duplicate_rownames: number;
+  warnings: string[];
+}
+
+export interface SjvJunctionMetadataLoaded {
+  n_rows: number;
+  n_duplicate_rownames: number;
+  has_annotation_detail: boolean;
   warnings: string[];
 }
 

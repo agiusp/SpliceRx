@@ -34,6 +34,9 @@ class Session:
     min_group_n: Optional[int] = None              # min_group_n currently applied
     use_histology: bool = True                     # whether Group includes Histology
     histology_map: Dict[str, str] = field(default_factory=dict)  # raw value -> merged label
+    event_quantile: float = 0.5                    # fraction of a group required to have died
+    #                                                 for its Cox survival-time threshold to be
+    #                                                 defined — 0.5 is the classic median
     selected_covariates: List[str] = field(default_factory=list)  # keys into
     # services.metadata.RawMetadata.available_covariates(), used alongside
     # the selected molecular features at cross-validate/model time
@@ -58,6 +61,9 @@ class Session:
 
     selection: Optional[Any] = None               # services.select.Selection
     selected_group: Optional[str] = None           # the Group the selection was made for
+    rank_cache: Optional[Any] = None               # (cache key, services.select.Ranking) —
+    # the last "Top by MAD/Var" ranking computed, reused when the user only changes `top_n`
+    # (see api/routes.py's select()); invalidated by anything that changes the candidate set
     labels: Optional[Dict[str, str]] = None        # sample_id -> "Good" | "Poor"
     model: Optional[Any] = None                   # services.model.TrainedModel (saved MODEL)
 

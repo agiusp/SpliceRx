@@ -57,6 +57,28 @@ SOURCES_FILE = Path(
 
 _CODING_FEATURES = {"exon", "CDS"}
 
+# Curated low-mappability / segmental-duplication / hyper-polymorphic
+# gene-family name patterns (matched case-insensitively against a gene's
+# lower-cased symbol) — HLA, immunoglobulin and TCR loci, the mitochondrial
+# genes, olfactory receptors, and several named segmental-duplication
+# clusters. These are gene *families* known to multi-map or otherwise
+# confound short-read splice-junction calling; the pattern list (and its use
+# as an optional exclusion filter alongside "protein-coding only") comes from
+# repeated cross-cohort TCGA splice-junction analyses where these families
+# dominated an unfiltered ranking with noise rather than tumour biology.
+PARALOG_FAMILY_PATTERNS = [
+    r"^hla-", r"^igh[vdjc]", r"^igk[vjc]", r"^igl[vjc]", r"^tr[abgd][vdjc]",
+    r"^mt-", r"^or\d", r"^spdye", r"^rasa4", r"^polr2j", r"^pkd1p",
+    r"^golga[68]", r"^nbpf", r"^ankrd20a", r"^usp17l", r"^pote[a-z]", r"^dux4",
+]
+_PARALOG_FAMILY_RE = re.compile("|".join(PARALOG_FAMILY_PATTERNS))
+
+
+def is_paralog_family(name_lc: str) -> bool:
+    """Whether a lower-cased gene symbol matches one of the curated
+    low-mappability paralog-family patterns above."""
+    return bool(_PARALOG_FAMILY_RE.match(name_lc))
+
 _HUMAN = "https://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_human/release_{n}/gencode.v{n}.annotation.gtf.gz"
 _HUMAN37 = "https://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_human/release_{n}/GRCh37_mapping/gencode.v{n}lift37.annotation.gtf.gz"
 _MOUSE = "https://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_mouse/release_M{n}/gencode.vM{n}.annotation.gtf.gz"
@@ -263,6 +285,21 @@ class Annotation:
         finally:
             con.close()
         return {r["name_lc"] for r in rows}
+
+    def paralog_family_names(self) -> set:
+        """Lower-cased names of every gene in the reference matching one of
+        the curated low-mappability paralog-family patterns (HLA,
+        immunoglobulin/TCR loci, MT-*, olfactory receptors, and the other
+        named segmental-duplication clusters — see `PARALOG_FAMILY_PATTERNS`
+        above), regardless of biotype. Meant to be subtracted from (or, for a
+        gene-level matrix, matched directly against) a candidate gene set —
+        see `sjvc.services.mad.top_features_by_mad`'s `exclude` parameter."""
+        con = self._con()
+        try:
+            rows = con.execute("SELECT DISTINCT name_lc FROM genes").fetchall()
+        finally:
+            con.close()
+        return {r["name_lc"] for r in rows if is_paralog_family(r["name_lc"])}
 
     def genes_by_prefix(self, prefix: str, limit: int = 1000) -> List[Gene]:
         """All genes whose name starts with `prefix` (case-insensitive).

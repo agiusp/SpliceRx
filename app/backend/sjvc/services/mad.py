@@ -1,4 +1,5 @@
-"""Pick the top-N most variable features by median absolute deviation (MAD),
+"""Pick the top-N most variable features by median absolute deviation (MAD)
+— or, for RRS scores, by plain variance instead (see `top_features_by_mad`) —
 as an alternative to choosing a gene set explicitly.
 
 - For a raw junction matrix (rows named chr:start-end:strand), the ranked
@@ -29,6 +30,7 @@ varying — that row is real, just not a top-ranked one, and stays eligible.
 from __future__ import annotations
 
 from collections import defaultdict
+from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 import numpy as np
@@ -151,12 +153,34 @@ def junction_rownames_overlapping_genes(
     }
 
 
-def top_features_by_mad(
-    matrix: Matrix, top_n: int, *, restrict_to: Optional[Set[str]] = None,
+@dataclass
+class Ranking:
+    """The top_n-independent result of ranking a matrix's rows: every
+    candidate row (after the restrict/exclude/coverage/zero-variance filters)
+    reduced to its index into `matrix.features`, ordered best-first by the
+    ranking statistic (descending MAD, or variance for RRS scores). Slicing
+    this to any `top_n` (see `features_from_ranking`) is then just a list
+    slice + a small `dense_block` call — cheap regardless of how big the
+    original matrix or candidate set was — which is the point: a caller
+    re-ranking the same matrix under the same filters but a different top_n
+    (e.g. a UI slider) should compute the expensive part, this `Ranking`,
+    only once."""
+    kind: str                  # "junction" | "gene"
+    ranked_rows: List[int]     # indices into matrix.features, best-first
+
+
+def rank_by_mad(
+    matrix: Matrix, *, restrict_to: Optional[Set[str]] = None,
+    exclude: Optional[Set[str]] = None, only_rownames: Optional[Set[str]] = None,
     n_min: Optional[float] = None, x_min: float = 0.0,
     annotation: Optional[Annotation] = None,
-) -> FeatureMatrix:
-    """Rank the matrix's rows by descending MAD and keep the top N.
+) -> Ranking:
+    """Rank the matrix's rows by descending MAD (or variance — see below) and
+    return every candidate, best-first, as a `Ranking` — the top_n-independent
+    part of `top_features_by_mad`, split out so a caller can cache it and
+    answer several different `top_n` requests against the same filters
+    without repeating the expensive work (gene-overlap resolution, coverage
+    counting, and the per-row score computation itself).
 
     A raw junction matrix is ranked over its parseable junction rows only
     (kind="junction"); an already-condensed matrix, whose row names are gene
@@ -172,12 +196,32 @@ def top_features_by_mad(
     information to filter on, so a live GENCODE reference is required either
     way.
 
+    `exclude` (also lower-cased gene names, e.g. a curated paralog-family
+    list) is the subtractive counterpart of `restrict_to`, applied
+    independently of it — a row is dropped when its gene (gene-level) or any
+    gene it overlaps (junction-level, via `annotation` again) is in `exclude`.
+    Passing both narrows to `restrict_to` genes not also in `exclude`.
+
+    `only_rownames`, when given, is a plain allowlist of exact row labels
+    (e.g. junctions that clear a minimum-supporting-read-count filter against
+    a sibling matrix) — applied last, with no gene resolution needed.
+
     `n_min`/`x_min` are an optional coverage prefilter, applied before
     ranking: a row is a candidate only when at least `n_min` samples (a count
     if `>= 1`, else a fraction of all samples) have an entry that is
     non-zero *and* `>= x_min`. Meaningful mainly for a raw per-junction
     matrix; `n_min=None` (the default) skips the prefilter entirely, ranking
-    every row exactly as before this parameter existed."""
+    every row exactly as before this parameter existed.
+
+    The ranking statistic itself is MAD, except when `matrix.kind ==
+    "rrs_scores"` (only ever true for a `Sjdat`, never a plain uploaded
+    `Matrix`), where it is plain variance instead — MAD suits count-like data
+    (gene/pathway mis-splice counts) with a few strong outliers, but RRS
+    scores are bounded to [0, 1] and mostly zero, so the *median* of a row is
+    almost always exactly 0 and MAD collapses to (near-)0 for the great
+    majority of rows, leaving too many ties to rank meaningfully; variance
+    does not have that failure mode. Either way the zero-variance exclusion
+    below is unaffected."""
     junction_idx: List[int] = []
     for i, rn in enumerate(matrix.features):
         try:
@@ -202,6 +246,20 @@ def top_features_by_mad(
                 raise ValueError(
                     "none of the matrix's junctions overlap a protein-coding gene in the reference"
                 )
+        if exclude:
+            if annotation is None:
+                raise ValueError(
+                    "a GENCODE reference is needed to resolve junctions to genes for the "
+                    "paralog-family exclusion"
+                )
+            drop_rownames = junction_rownames_overlapping_genes(
+                (matrix.features[i] for i in idx), annotation, exclude,
+            )
+            idx = [i for i in idx if matrix.features[i] not in drop_rownames]
+            if not idx:
+                raise ValueError(
+                    "every candidate junction overlaps an excluded paralog-family gene"
+                )
     else:
         idx, kind = list(range(len(matrix.features))), "gene"
         if restrict_to is not None:
@@ -214,6 +272,20 @@ def top_features_by_mad(
                     "none of the matrix's genes are in the requested set "
                     "(e.g. no protein-coding gene names matched the reference)"
                 )
+        if exclude:
+            idx = [
+                i for i in idx
+                if gene_name_of_label(matrix.features[i]).strip().lower() not in exclude
+            ]
+            if not idx:
+                raise ValueError("every candidate gene is in the excluded paralog-family set")
+    if only_rownames is not None:
+        idx = [i for i in idx if matrix.features[i] in only_rownames]
+        if not idx:
+            raise ValueError(
+                "no feature meets the minimum supporting-read-count filter — lower it, or turn "
+                "it off"
+            )
     if not idx:
         raise ValueError("the uploaded matrix has no rows to rank")
 
@@ -245,24 +317,96 @@ def top_features_by_mad(
     varies = variances > _CONSTANT_VAR_EPS
     idx = [i for i, keep in zip(idx, varies) if keep]
     scores = scores[varies]
+    variances = variances[varies]
     if not idx:
         raise ValueError("every row is constant (zero variance) — nothing to rank")
 
-    top = _top_indices(scores, top_n)
-    rows = [idx[i] for i in top]
+    rank_by_variance = getattr(matrix, "kind", None) == "rrs_scores"
+    stat = variances if rank_by_variance else scores
+    order = np.argsort(stat)[::-1]
+    return Ranking(kind=kind, ranked_rows=[idx[i] for i in order])
+
+
+def features_from_ranking(matrix: Matrix, ranking: Ranking, top_n: int) -> FeatureMatrix:
+    """Slice a `Ranking` (see `rank_by_mad`) down to its `top_n` best rows,
+    in the matrix's own row order (not by rank) — matching
+    `top_features_by_mad`'s long-standing output order exactly."""
+    n = max(1, min(top_n, len(ranking.ranked_rows)))
+    rows = sorted(ranking.ranked_rows[:n])
     values = (
         matrix.dense_block(rows, list(range(matrix.n_samples)))
         if getattr(matrix, "sparse", False)
         else matrix.values[rows, :]
     )
-
     return FeatureMatrix(
-        kind=kind,
+        kind=ranking.kind,
         feature_ids=[matrix.features[i] for i in rows],
         samples=list(matrix.samples),
         values=values,
-        n_junctions=len(rows) if kind == "junction" else 0,
+        n_junctions=len(rows) if ranking.kind == "junction" else 0,
     )
+
+
+def top_features_by_mad(
+    matrix: Matrix, top_n: int, *, restrict_to: Optional[Set[str]] = None,
+    exclude: Optional[Set[str]] = None, only_rownames: Optional[Set[str]] = None,
+    n_min: Optional[float] = None, x_min: float = 0.0,
+    annotation: Optional[Annotation] = None,
+) -> FeatureMatrix:
+    """Rank the matrix's rows by descending MAD and keep the top N.
+
+    A one-shot convenience that just calls `rank_by_mad` then
+    `features_from_ranking` — a caller that will ask for several different
+    `top_n` values against the same matrix/filters (e.g. a UI slider) should
+    call those two directly and cache the `Ranking` instead, to avoid
+    repeating the expensive ranking work on every change; see their
+    docstrings.
+
+    A raw junction matrix is ranked over its parseable junction rows only
+    (kind="junction"); an already-condensed matrix, whose row names are gene
+    symbols rather than chr:start-end:strand, is ranked over every row as-is
+    (kind="gene").
+
+    `restrict_to` (a set of lower-cased gene names, e.g. the protein-coding
+    genes of a reference) drops rows not in the set before ranking. In the
+    gene-level case this is a direct row-name match; in the junction-level
+    case it needs `annotation` to resolve which gene(s) each junction
+    overlaps (`junction_rownames_overlapping_genes` above) — the cohort's own
+    junction-metadata gene lookup, when loaded, has no gene-biotype
+    information to filter on, so a live GENCODE reference is required either
+    way.
+
+    `exclude` (also lower-cased gene names, e.g. a curated paralog-family
+    list) is the subtractive counterpart of `restrict_to`, applied
+    independently of it — a row is dropped when its gene (gene-level) or any
+    gene it overlaps (junction-level, via `annotation` again) is in `exclude`.
+    Passing both narrows to `restrict_to` genes not also in `exclude`.
+
+    `only_rownames`, when given, is a plain allowlist of exact row labels
+    (e.g. junctions that clear a minimum-supporting-read-count filter against
+    a sibling matrix) — applied last, with no gene resolution needed.
+
+    `n_min`/`x_min` are an optional coverage prefilter, applied before
+    ranking: a row is a candidate only when at least `n_min` samples (a count
+    if `>= 1`, else a fraction of all samples) have an entry that is
+    non-zero *and* `>= x_min`. Meaningful mainly for a raw per-junction
+    matrix; `n_min=None` (the default) skips the prefilter entirely, ranking
+    every row exactly as before this parameter existed.
+
+    The ranking statistic itself is MAD, except when `matrix.kind ==
+    "rrs_scores"` (only ever true for a `Sjdat`, never a plain uploaded
+    `Matrix`), where it is plain variance instead — MAD suits count-like data
+    (gene/pathway mis-splice counts) with a few strong outliers, but RRS
+    scores are bounded to [0, 1] and mostly zero, so the *median* of a row is
+    almost always exactly 0 and MAD collapses to (near-)0 for the great
+    majority of rows, leaving too many ties to rank meaningfully; variance
+    does not have that failure mode. Either way the zero-variance exclusion
+    below is unaffected, and ties are broken the same way in `_top_indices`."""
+    ranking = rank_by_mad(
+        matrix, restrict_to=restrict_to, exclude=exclude, only_rownames=only_rownames,
+        n_min=n_min, x_min=x_min, annotation=annotation,
+    )
+    return features_from_ranking(matrix, ranking, top_n)
 
 
 def _load_all_genes(annotation: Annotation) -> List[Gene]:

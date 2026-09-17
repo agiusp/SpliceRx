@@ -1,7 +1,7 @@
 interface Props {
   /** Data already in the session, loaded on the Data tab (or restored after a
    *  page refresh) — shown as chips. */
-  loaded?: { rds?: string; ann?: string };
+  loaded?: { rds?: string; ann?: string; jmeta?: string };
 }
 
 /**
@@ -29,6 +29,17 @@ export default function UploadPanel({ loaded }: Props) {
           <span className="chip">✓ {loaded.ann}</span>
         ) : (
           <span className="muted">Choose a GENCODE release on the Data tab.</span>
+        )}
+      </div>
+
+      <div className="row" style={{ marginTop: 12 }}>
+        <label style={{ display: "block" }}>Junction metadata (optional)</label>
+        {loaded?.jmeta ? (
+          <span className="chip">✓ {loaded.jmeta}</span>
+        ) : (
+          <span className="muted">
+            Load it on the Data tab to classify arcs from the aligner's own "annotated" column.
+          </span>
         )}
       </div>
     </div>

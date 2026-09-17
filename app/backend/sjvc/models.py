@@ -114,11 +114,20 @@ class FeaturesRequest(BaseModel):
 class MadFeaturesRequest(BaseModel):
     condense: bool = False
     top_n: int = 50
-    protein_coding_only: bool = False   # gene-level matrices: restrict to protein_coding biotype
+    protein_coding_only: bool = False   # restrict to protein_coding biotype, excluding MT-* genes
+    # exclude any gene in the curated low-mappability paralog-family list
+    # (HLA, immunoglobulin/TCR loci, MT-*, olfactory receptors, and other
+    # named segmental-duplication clusters — see gencode.PARALOG_FAMILY_PATTERNS),
+    # independently of protein_coding_only (either, both, or neither may be set)
+    exclude_paralog_families: bool = False
     # coverage prefilter — meaningful (and only shown by the frontend) for a
     # junction-level matrix (junction_counts / rrs_scores); None skips it
     n_min: Optional[float] = None       # N — count if >= 1, else fraction of all samples
     x_min: float = 0.0                  # X — minimum magnitude of a counted entry
+    # RRS-scores-only: keep a junction only when its corresponding row in the
+    # (separately loaded) junction_counts sjdat has a max supporting read
+    # count above this, across the matrix's own samples; None skips it
+    min_supporting_reads: Optional[float] = None
 
 
 class FeaturesResponse(BaseModel):

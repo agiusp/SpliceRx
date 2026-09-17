@@ -56,6 +56,9 @@ class Session:
     species: str = "human"
     geneset: Optional[Any] = None        # services.geneset.GeneSet
     features: Optional[Any] = None       # services.features.FeatureMatrix
+    rank_cache: Optional[Any] = None     # (cache key, services.mad.Ranking) — the last "Top by
+    # MAD/Var" ranking computed, reused when the user only changes `top_n` (see
+    # api/routes.py's build_features_mad()); invalidated by anything that changes the candidate set
 
     def touch(self) -> None:
         self.last_seen = time.time()

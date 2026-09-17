@@ -49,9 +49,15 @@ class MetadataLoaded(BaseModel):
     age_max: Optional[float] = None
     age_bands: Optional[AgeBandsOut] = None
     min_group_n: Optional[int] = None
+    event_quantile: float = 0.5
     histology_counts: List[HistologyCountOut] = []   # raw values + counts, for the merge editor
     use_histology: bool = True                       # whether Group currently includes histology
     histology_map: Dict[str, str] = {}                # raw value -> merged label, currently applied
+    # whether a recognisable vital-status column (Alive/Dead) was found — a
+    # group's MedianSurvival is only actually censoring-adjusted when this is
+    # True; without it, every sample is conservatively treated as a confirmed
+    # death (see services/metadata.py's RawMetadata.has_vital_status)
+    has_vital_status: bool = False
     warnings: List[str] = []
 
 
@@ -77,6 +83,13 @@ class StratifyRequest(BaseModel):
     min_group_n: int = 20
     use_histology: bool = True     # False drops Histology from Group entirely
     histology_map: Dict[str, str] = {}   # raw value -> merged label; values not listed pass through
+    # fraction of a group required to have died (an "event") for its
+    # Cox-estimated survival-time threshold to be defined; 0.5 is the classic
+    # median. Lower it (e.g. 0.25) for a low-mortality cohort where the 50%
+    # median is never reached within follow-up for most groups — the
+    # threshold time is then reached sooner, at the cost of a more lopsided
+    # Good/Poor split (few, especially-early deaths vs. everyone else).
+    event_quantile: float = 0.5
 
 
 class GroupCountOut(BaseModel):
@@ -142,7 +155,16 @@ class SelectRequest(BaseModel):
     n_min: Optional[float] = None  # N — count if >= 1, else fraction of the group
     x_min: Optional[float] = 0.0   # X — minimum magnitude of a counted entry
     top_n: int = 100               # n — keep this many by MAD
-    protein_coding_only: bool = False   # restrict ranking to protein_coding-biotype genes
+    protein_coding_only: bool = False   # restrict to protein_coding biotype, excluding MT-* genes
+    # exclude any gene in the curated low-mappability paralog-family list
+    # (HLA, immunoglobulin/TCR loci, MT-*, olfactory receptors, and other
+    # named segmental-duplication clusters), independently of
+    # protein_coding_only (either, both, or neither may be set)
+    exclude_paralog_families: bool = False
+    # RRS-scores-only: keep a junction only when its corresponding row in the
+    # (separately loaded) junction_counts sjdat has a max supporting read
+    # count above this, across the group's samples; None skips it
+    min_supporting_reads: Optional[float] = None
 
 
 class SelectGenesetRequest(BaseModel):

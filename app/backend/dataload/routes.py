@@ -10,6 +10,9 @@
 - POST /sjvc/{sid}/junction-metadata load the per-junction gene annotation table into SJVC
 - POST /sjv/{sid}/junctions          load a junction count matrix into an SJV session
 - POST /sjv/{sid}/sample-metadata    load a sample-metadata table into an SJV session
+- POST /sjv/{sid}/junction-metadata  load the per-junction annotation table into SJV — lets the
+                                     sashimi plot classify arcs from its recount3/STAR-aligner
+                                     `annotated` column instead of live GENCODE matching
 - POST /sjsurv/{sid}/sjdat/{kind}    load an sjdat matrix into an SJSurv session
 - POST /sjsurv/{sid}/metadata        load the sample metadata into an SJSurv session
 - POST /sjsurv/{sid}/junction-metadata load the per-junction gene annotation table into SJSurv
@@ -44,8 +47,12 @@ from sjlookup.models import (
     SjdatLoaded as SjlookupSjdatLoaded,
 )
 from sjlookup.services.sessions import store as sjlookup_store
-from sjv.api.routes import ingest_rds, ingest_sample_metadata
-from sjv.models import RdsUploaded, SampleMetadataUploaded
+from sjv.api.routes import (
+    ingest_junction_metadata as sjv_ingest_junction_metadata,
+    ingest_rds,
+    ingest_sample_metadata,
+)
+from sjv.models import JunctionMetadataLoaded as SjvJunctionMetadataLoaded, RdsUploaded, SampleMetadataUploaded
 from sjv.services import gencode as sjv_gencode
 from sjv.services.sessions import store as sjv_store
 from sjvc.api.routes import (
@@ -268,6 +275,15 @@ def load_sample_metadata(sid: str, body: PathBody) -> SampleMetadataUploaded:
     s = _session(sjv_store, sid)
     src = _file_arg(body.path)
     return ingest_sample_metadata(s, _copy_in(s, f"metadata{''.join(src.suffixes) or '.rds'}", src))
+
+
+@router.post("/sjv/{sid}/junction-metadata", response_model=SjvJunctionMetadataLoaded)
+def load_sjv_junction_metadata(sid: str, body: PathBody) -> SjvJunctionMetadataLoaded:
+    s = _session(sjv_store, sid)
+    src = _file_arg(body.path)
+    return sjv_ingest_junction_metadata(
+        s, _copy_in(s, f"junction_metadata{''.join(src.suffixes) or '.rds'}", src)
+    )
 
 
 # --- SJSurv (survivor-group classification) ------------------------------- #

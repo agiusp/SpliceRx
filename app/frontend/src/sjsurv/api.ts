@@ -62,9 +62,16 @@ export interface MetadataLoaded {
   age_max: number | null;
   age_bands: AgeBands | null;
   min_group_n: number | null;
+  // fraction of a group required to have died for its Cox-estimated
+  // survival-time threshold to be defined; 0.5 is the classic median.
+  event_quantile: number;
   histology_counts: HistologyCount[];
   use_histology: boolean;
   histology_map: Record<string, string>;
+  // whether a recognisable vital-status (Alive/Dead) column was found — a
+  // group's MedianSurvival is only actually censoring-adjusted when true;
+  // otherwise every sample is conservatively treated as a confirmed death.
+  has_vital_status: boolean;
 }
 
 export interface CovariateColumn {
@@ -194,6 +201,9 @@ export interface SelectParams {
   x_min: number | null;
   top_n: number;
   protein_coding_only: boolean;
+  exclude_paralog_families: boolean;
+  // RRS scores only; null skips the filter
+  min_supporting_reads: number | null;
 }
 
 export interface StratifyParams {
@@ -202,6 +212,7 @@ export interface StratifyParams {
   min_group_n: number;
   use_histology: boolean;
   histology_map: Record<string, string>;
+  event_quantile: number;
 }
 
 export const api = {
@@ -223,6 +234,8 @@ export const api = {
     j<SelectResponse>(postJson(`/api/sjsurv/session/${sid}/select`, {
       group: p.group, n_min: p.n_min, x_min: p.x_min, top_n: p.top_n,
       protein_coding_only: p.protein_coding_only,
+      exclude_paralog_families: p.exclude_paralog_families,
+      min_supporting_reads: p.min_supporting_reads,
     })),
   // gene-set feature resolution — mirrors sjvc's setGeneset/buildFeatures
   // exactly, just against SJSurv's own session/matrix

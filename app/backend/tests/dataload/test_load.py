@@ -103,6 +103,25 @@ def test_load_junction_matrix_and_metadata_into_sjv(client, cohort_dir):
     assert "condition" in st["sample_metadata_columns"]
 
 
+def test_load_junction_metadata_into_sjv(client, cohort_dir):
+    sid = client.post("/api/sjv/session").json()["session_id"]
+    jc = cohort_dir / "TCGA_TEST_junction_counts.rds"
+    client.post(f"/api/dataload/sjv/{sid}/junctions", json={"path": str(jc)})
+
+    jm = cohort_dir / "TCGA_TEST_real_junction_metadata.csv"
+    jm.write_text(
+        "seqnames,start,end,strand,annotated,left_annotated,right_annotated\n"
+        "chr1,1201,1999,+,1,g29,g29\n"
+    )
+    r = client.post(f"/api/dataload/sjv/{sid}/junction-metadata", json={"path": str(jm)})
+    assert r.status_code == 200, r.text
+    assert r.json()["n_rows"] == 1
+    assert r.json()["has_annotation_detail"] is True
+
+    st = client.get(f"/api/sjv/session/{sid}/state").json()
+    assert st["has_junction_metadata"] is True
+
+
 def test_sjv_metadata_before_matrix_is_rejected(client, cohort_dir):
     sid = client.post("/api/sjv/session").json()["session_id"]
     md = cohort_dir / "TCGA_TEST_sj_meta.csv"

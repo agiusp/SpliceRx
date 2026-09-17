@@ -150,9 +150,11 @@ export default function DataLoad({
       if (!checked[f.name] || !loadable(f)) return false;
       if (target === "sjlookup") return f.role === "junction_metadata" || SJLOOKUP_MATRIX_ROLES.has(f.role);
       if (CLINICAL_ROLES.has(f.role)) return true; // sample/clinical table -> any app
-      if (target === "sjv") return f.role === "junction_counts";
-      // sjvc / sjsurv: any sjdat matrix, plus the optional junction-metadata
-      // table (fast gene lookup on a junction-level one) for both now
+      // sjv / sjvc / sjsurv: their own matrix role, plus the optional
+      // junction-metadata table — a faster, no-GENCODE-needed gene lookup for
+      // sjvc/sjsurv, and (new) an alternative recount3/STAR-aligner
+      // "annotated" classification for the sashimi plot's arcs
+      if (target === "sjv") return f.role === "junction_counts" || f.role === "junction_metadata";
       return f.role in SJDAT_ROLE_KIND || f.role === "junction_metadata";
     });
   }
@@ -215,12 +217,19 @@ export default function DataLoad({
   async function loadSjv(sid: string, dir: string, p: (l: string) => void, w: (file: string, ws: string[]) => void) {
     const picked = pickedFor("sjv");
     const matrix = picked.find((f) => f.role === "junction_counts");
+    const jmeta = picked.find((f) => f.role === "junction_metadata");
     const tables = picked.filter((f) => CLINICAL_ROLES.has(f.role));
     if (!matrix) return; // shouldn't happen — caller only invokes when `wantSjv` is true
     p(`Loading ${matrix.name}…`);
     const mres = await dataloadApi.loadJunctions(sid, `${dir}/${matrix.name}`);
     p(`✓ ${matrix.name} — ${mres.n_junctions.toLocaleString()} junctions × ${mres.samples.length} samples`);
     w(matrix.name, mres.warnings);
+    if (jmeta) {
+      p(`Loading ${jmeta.name}…`);
+      const r = await dataloadApi.loadSjvJunctionMetadata(sid, `${dir}/${jmeta.name}`);
+      p(`✓ ${jmeta.name} — ${r.n_rows.toLocaleString()} junction(s) loaded`);
+      w(jmeta.name, r.warnings);
+    }
     for (const t of tables) {
       p(`Loading ${t.name}…`);
       const tres = await dataloadApi.loadSampleMetadata(sid, `${dir}/${t.name}`);
@@ -319,9 +328,11 @@ export default function DataLoad({
         package), check the ones you want, and load once — each file is sent to every tab that
         can use it: the junction matrix to the <b>Sashimi plot</b>; any of the feature matrices
         (junction counts, RRS scores, the gene matrix, or the pathway matrix) to <b>2D View</b>{" "}
-        and <b>SJSurv</b>; the junction gene annotation to those two as well (a faster,
-        no-GENCODE-needed gene lookup) and to <b>SJ Lookup</b>, which uses it on its own to look
-        up individual junctions; junction counts and RRS scores also go to <b>SJ Lookup</b>,
+        and <b>SJSurv</b>; the junction gene annotation table to those two as well (a faster,
+        no-GENCODE-needed gene lookup), to <b>SJ Lookup</b>, which uses it on its own to look up
+        individual junctions, and to the <b>Sashimi plot</b>, which can classify its arcs from
+        the table's own recount3/STAR-aligner "annotated" column instead of live GENCODE
+        matching; junction counts and RRS scores also go to <b>SJ Lookup</b>,
         which adds the per-sample table shown for a single-junction lookup; a clinical /
         sample-metadata table to whichever of those are loaded.
       </p>
@@ -417,7 +428,7 @@ export default function DataLoad({
                         : f.role === "gene_matrix" || f.role === "pathway_matrix"
                           ? "2D View, SJSurv"
                           : f.role === "junction_metadata"
-                            ? "2D View, SJSurv, SJ Lookup"
+                            ? "Sashimi plot, 2D View, SJSurv, SJ Lookup"
                             : CLINICAL_ROLES.has(f.role)
                               ? "whichever tabs load"
                               : "—";

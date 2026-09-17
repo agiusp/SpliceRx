@@ -9,4 +9,5 @@ httpx==0.28.1
 scikit-learn==1.6.1
 scipy==1.13.1
 umap-learn==0.5.7
+lifelines==0.30.0
 pytest==8.3.4

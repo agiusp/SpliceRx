@@ -30,7 +30,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Sequence
+from typing import Dict, Iterable, List, Sequence, Set
 
 import numpy as np
 
@@ -163,6 +163,29 @@ class Sjdat:
             values=self.values[:, idx],
             sparse=self.sparse,
         )
+
+
+def rows_with_min_supporting_reads(
+    features: Iterable[str], junction_counts: "Sjdat", sample_ids: Sequence[str], min_reads: float,
+) -> Set[str]:
+    """Which of `features` (row labels of some other junction-level sjdat —
+    in practice, RRS scores) have a same-named row in `junction_counts`
+    (matched by the exact "chr:start-end:strand" label every junction-level
+    sjdat shares) whose value exceeds `min_reads` in at least one of
+    `sample_ids`. Sample columns are matched by id, not position, since the
+    two matrices need not share a column order or even the same full sample
+    set. A feature with no corresponding row in `junction_counts` does not
+    pass — there is no read-support evidence for it either way."""
+    want = [f for f in features if f in junction_counts._row]
+    if not want:
+        return set()
+    row_idx = [junction_counts._row[f] for f in want]
+    col_idx = junction_counts.column_indices(list(sample_ids))
+    if not col_idx:
+        return set()
+    block = np.nan_to_num(junction_counts.dense_block(row_idx, col_idx), nan=0.0)
+    row_max = block.max(axis=1)
+    return {f for f, m in zip(want, row_max) if m > min_reads}
 
 
 # --------------------------------------------------------------------------- #

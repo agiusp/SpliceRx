@@ -13,6 +13,7 @@ from ..models import (
     GeneLookupResponse,
     GeneRecord,
     GeneSuggestResponse,
+    JunctionMetadataLoaded,
     LegendEntry,
     PlotLayout,
     PlotRequest,
@@ -34,6 +35,11 @@ from ..services.groups import parse_sample_metadata
 from ..services.junctions import norm_chrom, scale_counts
 from ..services.rds import RdsError, load_rds
 from ..services.sessions import store
+from sjlookup.services.lookup import (
+    JunctionMetadataError as LookupMetadataError,
+    classify_unannotated,
+    load_junction_lookup_index,
+)
 
 router = APIRouter()
 
@@ -108,6 +114,8 @@ def session_state(session_id: str) -> SessionState:
         sparse=bool(s.rds and s.rds.sparse),
         sample_metadata_columns=list(s.metadata.columns) if s.metadata is not None else [],
         gencode_label=s.annotation.label if s.annotation is not None else None,
+        has_junction_metadata=s.junction_lookup is not None,
+        junction_metadata_has_detail=bool(s.junction_lookup and s.junction_lookup.has_annotation_detail),
     )
 
 
@@ -204,6 +212,51 @@ async def upload_sample_metadata(
     return ingest_sample_metadata(s, dest)
 
 
+def ingest_junction_metadata(s, src: Path) -> JunctionMetadataLoaded:
+    """Load the cohort's per-junction annotation table (``TCGA_<cohort>_
+    junction_metadata.rds``) so the sashimi plot can classify arcs from its
+    ``annotated``/``left_annotated``/``right_annotated`` columns — the
+    recount3/STAR-aligner annotation recorded when the cohort's junctions
+    were originally called — as an alternative to live GENCODE transcript
+    matching. See ``PlotRequest.annotation_source`` and
+    ``sjlookup.services.lookup``, which this reuses rather than
+    re-implementing."""
+    try:
+        idx = load_junction_lookup_index(src, s.tmp_dir)
+    except LookupMetadataError as e:
+        src.unlink(missing_ok=True)
+        raise HTTPException(422, str(e))
+    finally:
+        src.unlink(missing_ok=True)
+    s.junction_lookup = idx
+    warnings = []
+    if idx.n_duplicate_rownames:
+        warnings.append(
+            f"{idx.n_duplicate_rownames} duplicate junction row(s) in the table — the first of "
+            f"each was kept"
+        )
+    if not idx.has_annotation_detail:
+        warnings.append(
+            "no left_annotated/right_annotated columns — a junction the table doesn't mark "
+            "annotated will just read \"novel\" (no exon_skipping/alt_5p/alt_3p/novel_exon split)"
+        )
+    return JunctionMetadataLoaded(
+        n_rows=idx.n_rows, n_duplicate_rownames=idx.n_duplicate_rownames,
+        has_annotation_detail=idx.has_annotation_detail, warnings=warnings,
+    )
+
+
+@router.post("/session/{session_id}/junction-metadata", response_model=JunctionMetadataLoaded)
+async def upload_junction_metadata(session_id: str, file: UploadFile = File(...)) -> JunctionMetadataLoaded:
+    s = _session(session_id)
+    suffix = "".join(Path(file.filename or "junction_metadata.rds").suffixes) or ".rds"
+    dest = s.tmp_dir / f"junction_metadata{suffix}"
+    with open(dest, "wb") as fh:
+        while chunk := await file.read(1 << 20):
+            fh.write(chunk)
+    return ingest_junction_metadata(s, dest)
+
+
 @router.get(
     "/session/{session_id}/sample-metadata/values", response_model=StratValuesResponse
 )
@@ -230,6 +283,12 @@ def plot(session_id: str, body: PlotRequest) -> PlotResponse:
         raise HTTPException(409, "upload an RDS file first")
     if s.annotation is None:
         raise HTTPException(409, "select a GENCODE release or upload a GTF first")
+    if body.annotation_source == "metadata" and s.junction_lookup is None:
+        raise HTTPException(
+            409,
+            "load the cohort's junction metadata table (TCGA_<cohort>_junction_metadata.rds) on "
+            "the Data tab first, or switch the annotation source back to \"computed live\"",
+        )
 
     # resolve every requested gene name
     genes = []
@@ -307,18 +366,31 @@ def plot(session_id: str, body: PlotRequest) -> PlotResponse:
         )
     classifier = GeneClassifier(all_transcripts, tol=0)
 
-    arcs = [
-        ArcModel(
-            id=a.junction.rowname,
-            start=a.junction.start,
-            end=a.junction.end,
-            strand=a.junction.strand,
-            count=a.count,
-            height=a.height,
-            category=classifier.classify(a.junction),
+    n_metadata_fallback = 0
+    arcs = []
+    for a in arcs_scaled:
+        category, source = classifier.classify(a.junction), "gencode"
+        if body.annotation_source == "metadata":
+            row = s.junction_lookup.lookup(a.junction.rowname)
+            if row is None:
+                n_metadata_fallback += 1  # not in the table — keep the GENCODE fallback above
+            elif row.get("annotated"):
+                category, source = "annotated", "metadata"
+            else:
+                sub = classify_unannotated(s.junction_lookup, row)
+                category, source = (sub or "novel"), "metadata"
+        arcs.append(
+            ArcModel(
+                id=a.junction.rowname,
+                start=a.junction.start,
+                end=a.junction.end,
+                strand=a.junction.strand,
+                count=a.count,
+                height=a.height,
+                category=category,
+                category_source=source,
+            )
         )
-        for a in arcs_scaled
-    ]
 
     lo = min(g.start for g in genes)
     hi = max(g.end for g in genes)
@@ -331,6 +403,11 @@ def plot(session_id: str, body: PlotRequest) -> PlotResponse:
         cut = f" with >= {body.min_reads:g} reads" if body.min_reads > 0 else ""
         where = "these genes" if len(genes) > 1 else "this gene"
         warnings.append(f"no junctions{cut} fall within {where} for this {kind}")
+    if n_metadata_fallback:
+        warnings.append(
+            f"{n_metadata_fallback} of {len(arcs)} junction(s) have no row in the loaded "
+            "junction metadata table and were classified from the live GENCODE reference instead"
+        )
 
     return PlotResponse(
         genes=[GeneRecord(**g.__dict__) for g in genes],
@@ -340,6 +417,7 @@ def plot(session_id: str, body: PlotRequest) -> PlotResponse:
         arcs=arcs,
         legend=[LegendEntry(**e) for e in legend_entries([a.category for a in arcs])],
         series_label=series_label,
+        annotation_source=body.annotation_source,
         count_kind=count_kind,
         warnings=warnings,
     )

@@ -77,7 +77,8 @@ export default function UploadPanel({ options, activeSjdat, onPick, hasJunctionM
           <span className="muted">
             Optional — choose a GENCODE release on the Data tab. Needed for a junction-level
             matrix's typed-gene / pathway lookups only when no junction metadata is loaded, and
-            for the gene matrix's “protein-coding genes only” MAD filter.
+            for the “protein-coding, non-MT genes only” and “exclude low-mappability paralog
+            gene families” MAD filters.
           </span>
         )}
       </div>

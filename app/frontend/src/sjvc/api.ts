@@ -209,14 +209,17 @@ export const api = {
   async buildFeaturesMad(
     sid: string, topN: number, proteinCodingOnly = false,
     nMin: number | null = null, xMin = 0,
+    excludeParalogFamilies = false, minSupportingReads: number | null = null,
   ) {
     return j<FeaturesResponse>(
       await postJson(`/api/sjvc/session/${sid}/features/mad`, {
         condense: false,
         top_n: topN,
         protein_coding_only: proteinCodingOnly,
+        exclude_paralog_families: excludeParalogFamilies,
         n_min: nMin,
         x_min: xMin,
+        min_supporting_reads: minSupportingReads,
       }),
     );
   },

@@ -55,7 +55,9 @@ function hex2rgb(h: string) {
   const n = h.replace("#", "");
   return [parseInt(n.slice(0, 2), 16), parseInt(n.slice(2, 4), 16), parseInt(n.slice(4, 6), 16)];
 }
-function blend(corners: BivariateLegend["corners"], f1: number, f2: number) {
+// exported so the projection's SVG export (Projection.tsx) can render the
+// same bivariate colour key into the downloaded file, not just on screen
+export function blend(corners: BivariateLegend["corners"], f1: number, f2: number) {
   const ll = hex2rgb(corners.lo_lo);
   const hl = hex2rgb(corners.hi_lo);
   const lh = hex2rgb(corners.lo_hi);

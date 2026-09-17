@@ -81,8 +81,13 @@ export default function App({ sessionId, reloadNonce, sjvSessionId, sjvcSessionI
   const [openEnded, setOpenEnded] = useState(true);
   const [includeLowest, setIncludeLowest] = useState(false);
   const [minGroupN, setMinGroupN] = useState(CLASSIC_MIN_GROUP_N);
+  // % of a group required to have died for its Cox-estimated survival-time
+  // threshold to be defined — 50 is the classic median; lower it for a
+  // low-mortality cohort where 50% is never reached within follow-up.
+  const [eventQuantilePct, setEventQuantilePct] = useState(50);
   const [appliedLabels, setAppliedLabels] = useState<string[]>([]);
   const [appliedMinGroupN, setAppliedMinGroupN] = useState(CLASSIC_MIN_GROUP_N);
+  const [appliedEventQuantilePct, setAppliedEventQuantilePct] = useState(50);
   const [suggestedLabels, setSuggestedLabels] = useState<string[] | null>(null);
   const [suggestBusy, setSuggestBusy] = useState(false);
   const [stratifyBusy, setStratifyBusy] = useState(false);
@@ -117,6 +122,8 @@ export default function App({ sessionId, reloadNonce, sjvSessionId, sjvcSessionI
   const [xMin, setXMin] = useState(1);
   const [topN, setTopN] = useState(100);
   const [codingOnly, setCodingOnly] = useState(false);
+  const [excludeParalogs, setExcludeParalogs] = useState(false);
+  const [minSupportingReads, setMinSupportingReads] = useState<number | null>(null);
   const [features, setFeatures] = useState<FeaturesResponse | null>(null);
   const [nCv, setNCv] = useState(5);
 
@@ -135,7 +142,12 @@ export default function App({ sessionId, reloadNonce, sjvSessionId, sjvcSessionI
       .then(async (st) => {
         setState(st);
         const bands = st.metadata?.age_bands;
-        if (bands) seedBandEditor(bands, st.metadata?.min_group_n ?? CLASSIC_MIN_GROUP_N);
+        if (bands) {
+          seedBandEditor(bands, st.metadata?.min_group_n ?? CLASSIC_MIN_GROUP_N);
+          const pct = Math.round((st.metadata?.event_quantile ?? 0.5) * 100);
+          setEventQuantilePct(pct);
+          setAppliedEventQuantilePct(pct);
+        }
         if (st.metadata) seedHistologyEditor(st.metadata);
         setCovariateColumns(st.covariate_columns);
         setSelectedCovariates(st.selected_covariates);
@@ -213,6 +225,7 @@ export default function App({ sessionId, reloadNonce, sjvSessionId, sjvcSessionI
     setOpenEnded(true);
     setIncludeLowest(false);
     setMinGroupN(CLASSIC_MIN_GROUP_N);
+    setEventQuantilePct(50);
     setSuggestedLabels(null);
   }
 
@@ -249,9 +262,11 @@ export default function App({ sessionId, reloadNonce, sjvSessionId, sjvcSessionI
       const md = await api.stratify(sessionId, {
         edges: wireEdges, include_lowest: includeLowest, min_group_n: minGroupN,
         use_histology: useHistology, histology_map: histologyMap,
+        event_quantile: eventQuantilePct / 100,
       });
       setAppliedLabels(md.age_bands?.labels ?? []);
       setAppliedMinGroupN(md.min_group_n ?? minGroupN);
+      setAppliedEventQuantilePct(Math.round(md.event_quantile * 100));
       seedHistologyEditor(md);
       clearDownstream();
       const g = await api.groups(sessionId);
@@ -289,6 +304,8 @@ export default function App({ sessionId, reloadNonce, sjvSessionId, sjvcSessionI
         group: ALL_GROUPS, top_n: topN,
         n_min: showCoverage ? nMin : null, x_min: showCoverage ? xMin : null,
         protein_coding_only: codingOnly,
+        exclude_paralog_families: excludeParalogs,
+        min_supporting_reads: state?.active_sjdat === "rrs_scores" ? minSupportingReads : null,
       }),
     );
     if (r) {
@@ -355,10 +372,12 @@ export default function App({ sessionId, reloadNonce, sjvSessionId, sjvcSessionI
       <p className="sub">
         Does a cohort's splice-junction signal separate <b>Good</b> from <b>Poor</b> survivors?
         SJSurv stratifies the cohort right here — by histology, pathologic stage and an age band
-        you control — and labels each stratum's samples Good/Poor by their own survival against
-        their stratum's median. The classifier itself always trains on every Good/Poor-labelled
-        sample: pick a feature matrix, select molecular features and clinical covariates, then
-        cross-validate a classifier of the survivor label.
+        you control — and labels each stratum's samples Good/Poor against a censoring-adjusted
+        median survival time fit with a Cox proportional-hazards model (not a plain median of
+        observed follow-up, which would understate a still-living patient's true survival). The
+        classifier itself always trains on every Good/Poor-labelled sample: pick a feature matrix,
+        select molecular features and clinical covariates, then cross-validate a classifier of the
+        survivor label.
       </p>
 
       {err && <div className="err">{err}</div>}
@@ -434,14 +453,29 @@ export default function App({ sessionId, reloadNonce, sjvSessionId, sjvcSessionI
       >
         <p className="muted" style={{ marginTop: 0, fontSize: 13 }}>
           Each sample's <code>Group</code> is {useHistology ? "Histology | " : ""}Stage | age band;
-          within a <code>Group</code> with at least <b>{appliedMinGroupN}</b> samples, a sample is
-          labelled <b>Good</b> if its survival is at or above that group's median, <b>Poor</b>{" "}
-          otherwise. Currently stratifying by age into: <b>{appliedLabels.join(", ") || "…"}</b>.
-          Adjust the age bands and histology grouping below to try to grow the number of Good/Poor
-          labels — but every classifier downstream always trains on <b>every</b> labelled sample
-          (the "{groups[0]?.label ?? "All labelled samples"}" row below), regardless of which
+          within a <code>Group</code> with at least <b>{appliedMinGroupN}</b> samples, the survival
+          time at which <b>{appliedEventQuantilePct}%</b> of the group has died is fit with a Cox
+          proportional-hazards model (censoring-adjusted — a patient still alive at last follow-up
+          is not treated as having died at that point){appliedEventQuantilePct === 50 ? " — the classic median" : ""}.
+          A sample is labelled <b>Good</b> if its own follow-up reaches that threshold, <b>Poor</b>{" "}
+          if it died before reaching it, and left <b>unlabelled</b> if it was still alive when
+          followed up short of it — its eventual outcome relative to the threshold is genuinely
+          unknown, and forcing a "Poor" label onto it would reintroduce exactly the bias this model
+          exists to remove. Currently stratifying by age into:{" "}
+          <b>{appliedLabels.join(", ") || "…"}</b>. Adjust the age bands and histology grouping
+          below to try to grow the number of Good/Poor labels — but every classifier downstream
+          always trains on <b>every</b> labelled sample (the "
+          {groups[0]?.label ?? "All labelled samples"}" row below), regardless of which
           stratification Group a sample falls into.
         </p>
+        {state?.metadata && !state.metadata.has_vital_status && (
+          <div className="warn" style={{ marginBottom: 10 }}>
+            No vital-status (Alive/Dead) column was found in this cohort's sample metadata, so
+            every sample is conservatively treated as a confirmed death — each group's median
+            survival above is <b>not actually censoring-adjusted</b> for this cohort, and no
+            sample is ever left unlabelled.
+          </div>
+        )}
         {(() => {
           // the aggregate "All labelled samples" row is always first (see
           // services/metadata.py's group_counts()) and always shown; every
@@ -693,6 +727,18 @@ export default function App({ sessionId, reloadNonce, sjvSessionId, sjvcSessionI
                 onChange={(e) => setMinGroupN(Math.max(1, Math.round(Number(e.target.value) || 1)))}
               />
             </label>
+            <label>
+              % of a Group required to have died, for a survival-time threshold
+              <input
+                type="number"
+                min={1}
+                max={99}
+                step={1}
+                value={eventQuantilePct}
+                style={{ width: 90 }}
+                onChange={(e) => setEventQuantilePct(Math.min(99, Math.max(1, Math.round(Number(e.target.value) || 1))))}
+              />
+            </label>
             <button disabled={stratifyBusy} onClick={doApplyStratify}>
               {stratifyBusy ? "Applying…" : "Apply stratification"}
             </button>
@@ -700,6 +746,13 @@ export default function App({ sessionId, reloadNonce, sjvSessionId, sjvcSessionI
           <p className="muted" style={{ fontSize: 12, marginTop: 6 }}>
             e.g. for just two age bands (under 50 / 50 and over), set "Number of age bands" to 2 and
             edit the single edge to 50.
+          </p>
+          <p className="muted" style={{ fontSize: 12, marginTop: 2 }}>
+            50% is the classic median survival time. A low-mortality cohort can leave many groups'
+            50% threshold unreached within follow-up (no labels at all for those groups) — lowering
+            this (e.g. to 25%) reaches a defined threshold sooner, at the cost of a more lopsided
+            Good/Poor split: "Poor" then means "died unusually early," not "died before the halfway
+            point."
           </p>
         </div>
       </Panel>
@@ -837,11 +890,15 @@ export default function App({ sessionId, reloadNonce, sjvSessionId, sjvcSessionI
             onModeChange={setGeneSetMode}
             onTopNChange={setTopN}
             onCodingOnlyChange={setCodingOnly}
+            onExcludeParalogsChange={setExcludeParalogs}
             nMin={nMin}
             xMin={xMin}
             onNMinChange={setNMin}
             onXMinChange={setXMin}
             nNonzeroRows={opts.find((o) => o.kind === "pathway_matrix")?.n_nonzero_rows ?? null}
+            junctionCountsLoaded={!!opts.find((o) => o.kind === "junction_counts")?.loaded}
+            minSupportingReads={minSupportingReads}
+            onMinSupportingReadsChange={setMinSupportingReads}
           />
         )}
 
@@ -849,14 +906,14 @@ export default function App({ sessionId, reloadNonce, sjvSessionId, sjvcSessionI
           <button
             disabled={
               !selectReady || busy === "select" || (geneSetMode !== "mad" && !features)
-              || (geneSetMode === "mad" && codingOnly && !state?.gencode_label)
+              || (geneSetMode === "mad" && (codingOnly || excludeParalogs) && !state?.gencode_label)
             }
             onClick={geneSetMode === "mad" ? doSelect : doSelectGeneset}
           >
             {busy === "select" ? "Selecting…" : "Select features"}
           </button>
-          {geneSetMode === "mad" && codingOnly && !state?.gencode_label && (
-            <span className="muted">choose a GENCODE reference on the Data tab to filter to protein-coding genes</span>
+          {geneSetMode === "mad" && (codingOnly || excludeParalogs) && !state?.gencode_label && (
+            <span className="muted">choose a GENCODE reference on the Data tab to filter to protein-coding / paralog-family genes</span>
           )}
         </div>
 
