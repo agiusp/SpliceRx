@@ -26,6 +26,10 @@ const postJson = (url: string, body: unknown) =>
 
 export type SjdatKind = "junction_counts" | "rrs_scores" | "gene_matrix" | "pathway_matrix";
 
+// classification always runs on every Good/Poor-labelled sample, regardless
+// of which stratification Group a sample falls into — see App.tsx.
+export const ALL_GROUPS = "__all__";
+
 export interface SjdatOption {
   kind: SjdatKind;
   label: string;
@@ -63,6 +67,14 @@ export interface MetadataLoaded {
   histology_map: Record<string, string>;
 }
 
+export interface CovariateColumn {
+  key: string;             // "__histology__" | "__stage__" | "__age__", or a raw column name
+  label: string;
+  kind: "numeric" | "categorical";
+  n_available: number;
+  default: boolean;
+}
+
 export interface SessionState {
   has_raw_metadata: boolean;
   has_metadata: boolean;
@@ -77,6 +89,8 @@ export interface SessionState {
   selected_group: string | null;
   has_selection: boolean;
   has_model: boolean;
+  covariate_columns: CovariateColumn[];
+  selected_covariates: string[];
 }
 
 // gene-set feature resolution (Type genes / Upload list / Pathway tabs) —
@@ -203,6 +217,8 @@ export const api = {
     j<MetadataLoaded>(postJson(`/api/sjsurv/session/${sid}/stratify`, p)),
   activateSjdat: (sid: string, kind: SjdatKind) =>
     j<SessionState>(postJson(`/api/sjsurv/session/${sid}/sjdat`, { kind })),
+  setCovariates: (sid: string, columns: string[]) =>
+    j<SessionState>(postJson(`/api/sjsurv/session/${sid}/covariates`, { columns })),
   select: (sid: string, p: SelectParams) =>
     j<SelectResponse>(postJson(`/api/sjsurv/session/${sid}/select`, {
       group: p.group, n_min: p.n_min, x_min: p.x_min, top_n: p.top_n,

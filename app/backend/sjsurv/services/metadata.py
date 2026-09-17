@@ -106,6 +106,11 @@ _DAYS_TO_LAST_FOLLOWUP_ALIASES = (
 _LEGACY_DERIVED_COLS = {"histology", "stage", "age_at_diagnosis", "group", "survivergroup", "mediansurvival"}
 _MISSING = {"", "nan", "none", "na", "n/a", "null"}
 _ABC_SUFFIX = re.compile(r"[abcd][0-9]?$")
+# A column whose name matches this is offered as a covariate *and* checked on
+# by default (with Stage / Age At Diagnosis / Histology) — same pattern
+# dataload/scan.py uses to spot an `*_MSI.rds` file, applied here to a column
+# name instead of a filename.
+_MSI_COL = re.compile(r"(^|[_.\-])msi([_.\-]|$)", re.I)
 
 
 class MetadataError(ValueError):
@@ -130,6 +135,27 @@ def _to_float(v: object) -> Optional[float]:
 
 
 # --------------------------------------------------------------------------- #
+# covariates — sample aspects (from the loaded file) a classifier can use
+# alongside the selected molecular features. Histology/Stage/Age At Diagnosis
+# are keyed specially since they're already parsed into their own `rows`
+# fields under cryptic real column names; everything else is keyed by its
+# raw column name directly.
+# --------------------------------------------------------------------------- #
+COV_HISTOLOGY = "__histology__"
+COV_STAGE = "__stage__"
+COV_AGE = "__age__"
+
+
+@dataclass
+class CovariateColumn:
+    key: str                # COV_HISTOLOGY/COV_STAGE/COV_AGE, or a raw column name
+    label: str               # display label
+    kind: str                 # "numeric" | "categorical"
+    n_available: int          # samples with a non-missing value
+    default: bool             # checked by default (Stage/Age/Histology, or an MSI-named column)
+
+
+# --------------------------------------------------------------------------- #
 # raw sample metadata
 # --------------------------------------------------------------------------- #
 @dataclass
@@ -138,6 +164,13 @@ class RawMetadata:
     #               "age": float|None, "os": float|None}
     rows: Dict[str, Dict[str, object]]
     n_unmatched: int = 0
+    # every other column in the sample-metadata file (i.e. not the id column,
+    # not histology/stage/age/survival, and never a survival-time-derived one
+    # — see the exclusion list built in parse_raw_metadata) — sample_id ->
+    # {raw column name -> raw value}. The candidate pool `available_covariates()`
+    # offers alongside the three specials below.
+    covariate_table: Dict[str, Dict[str, object]] = field(default_factory=dict)
+    covariate_columns: List[str] = field(default_factory=list)  # in file order
 
     @property
     def n_rows(self) -> int:
@@ -161,6 +194,54 @@ class RawMetadata:
         stratify()'s `use_histology`)."""
         c = Counter(r["histology"] for r in self.rows.values() if r["histology"] is not None)
         return sorted(c.items(), key=lambda kv: (-kv[1], kv[0]))
+
+    def available_covariates(self) -> List["CovariateColumn"]:
+        """Every sample aspect in the loaded file a classifier could use as a
+        covariate alongside the selected molecular features: the three
+        columns already read for `Group` (under friendly names, since their
+        real column names are the cryptic prepTCGAdata ones), plus every
+        other column in the file — excluding the id column and anything
+        survival-time-derived (`build_covariates()`'s caller never even sees
+        those; including the very quantity `SurviverGroup` is split on would
+        let the classifier "predict" it for free instead of testing whether
+        the molecular data carries the signal)."""
+        out = [
+            CovariateColumn(
+                key=COV_HISTOLOGY, label="Histology", kind="categorical",
+                n_available=sum(1 for r in self.rows.values() if r["histology"] is not None),
+                default=True,
+            ),
+            CovariateColumn(
+                key=COV_STAGE, label="Stage", kind="categorical",
+                n_available=sum(1 for r in self.rows.values() if stage_label(r["stage_raw"]) is not None),
+                default=True,
+            ),
+            CovariateColumn(
+                key=COV_AGE, label="Age At Diagnosis", kind="numeric",
+                n_available=sum(1 for r in self.rows.values() if r["age"] is not None),
+                default=True,
+            ),
+        ]
+        for col in self.covariate_columns:
+            present = [row.get(col) for row in self.covariate_table.values() if not _is_missing(row.get(col))]
+            if not present:
+                continue
+            n_numeric = sum(1 for v in present if _to_float(v) is not None)
+            kind = "numeric" if n_numeric >= max(1, round(0.9 * len(present))) else "categorical"
+            out.append(CovariateColumn(
+                key=col, label=_prettify_col(col), kind=kind, n_available=len(present),
+                default=bool(_MSI_COL.search(col)),
+            ))
+        return out
+
+
+def _prettify_col(name: str) -> str:
+    """A raw column name (often a dotted prepTCGAdata field like
+    `tcga.cgc_case_icd_10`) as a short display label — the part after the
+    last `.`, underscores/hyphens turned to spaces, capitalized."""
+    base = name.rsplit(".", 1)[-1]
+    base = re.sub(r"[_\-]+", " ", base).strip()
+    return (base[:1].upper() + base[1:]) if base else name
 
 
 def _find_col(cols: Dict[str, str], aliases: Sequence[str]) -> Optional[str]:
@@ -239,9 +320,22 @@ def parse_raw_metadata(path: Path, tmp_dir: Path, known_samples: Sequence[str]) 
             v = _to_float(r[fu_col])
         return v
 
+    # every other column is a covariate candidate — never the id column, never
+    # histology/stage/age (already exposed as the Histology/Stage/Age At
+    # Diagnosis specials), and never a survival-time column (os_col /
+    # death_col / fu_col): that's the exact quantity SurviverGroup is split
+    # on, and offering it as a covariate would let the classifier "predict"
+    # the label for free instead of testing the molecular data.
+    _excluded_cov_cols = {c for c in (id_col, hist_col, stage_col, age_col, os_col, death_col, fu_col) if c}
+    covariate_columns = [
+        str(c) for c in df.columns
+        if str(c) not in _excluded_cov_cols and str(c).strip().lower() not in _LEGACY_DERIVED_COLS
+    ]
+
     known = {str(s) for s in known_samples}
     filter_to_known = bool(known)   # no sjdat loaded yet -> keep every row
     rows: Dict[str, Dict[str, object]] = {}
+    covariate_table: Dict[str, Dict[str, object]] = {}
     n_unmatched = 0
     for _, r in df.iterrows():
         sid = str(r[id_col]).strip()
@@ -256,12 +350,16 @@ def parse_raw_metadata(path: Path, tmp_dir: Path, known_samples: Sequence[str]) 
             "age": _to_float(r[age_col]),
             "os": _os_value(r),
         }
+        covariate_table[sid] = {c: r[c] for c in covariate_columns}
 
     if not rows:
         raise MetadataError(
             "no `sample_id` in the metadata matched a column of the sjdat matrix"
         )
-    return RawMetadata(rows=rows, n_unmatched=n_unmatched)
+    return RawMetadata(
+        rows=rows, n_unmatched=n_unmatched,
+        covariate_table=covariate_table, covariate_columns=covariate_columns,
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -494,3 +592,67 @@ def stratify(
         rows[s] = {"group": group[i], "surviver": surviver}
 
     return Metadata(rows=rows, n_unmatched=raw.n_unmatched)
+
+
+# --------------------------------------------------------------------------- #
+# covariate matrix — turns the chosen covariate keys into classifier-ready
+# rows, aligned to `sample_ids` (the order `select_features()`/`select_from_
+# features()` fixed for the molecular feature matrix, so the two stack
+# directly). A numeric column becomes one row (missing imputed to the mean
+# over `sample_ids`); a categorical one becomes one 0/1 row per distinct
+# value *seen anywhere in the cohort* (not just `sample_ids`) so a category
+# absent from one cross-validation fold still gets a stable, zero-filled
+# column there rather than shifting the feature layout fold to fold.
+# --------------------------------------------------------------------------- #
+def build_covariates(
+    raw: RawMetadata,
+    keys: Sequence[str],
+    sample_ids: Sequence[str],
+    *,
+    histology_map: Optional[Dict[str, str]] = None,
+) -> Tuple[List[str], np.ndarray]:
+    hmap = histology_map or {}
+    names: List[str] = []
+    feature_rows: List[np.ndarray] = []
+
+    def add_numeric(label: str, values: Dict[str, Optional[float]]) -> None:
+        vals = [values.get(s) for s in sample_ids]
+        present = [v for v in vals if v is not None]
+        fill = float(np.mean(present)) if present else 0.0
+        names.append(label)
+        feature_rows.append(np.array([v if v is not None else fill for v in vals], dtype=float))
+
+    def add_categorical(label: str, values: Dict[str, Optional[str]]) -> None:
+        distinct = sorted({v for v in values.values() if v is not None})
+        for v in distinct:
+            names.append(f"{label}={v}")
+            feature_rows.append(
+                np.array([1.0 if values.get(s) == v else 0.0 for s in sample_ids], dtype=float)
+            )
+
+    for key in keys:
+        if key == COV_HISTOLOGY:
+            values = {
+                s: (hmap.get(r["histology"], r["histology"]) if r["histology"] is not None else None)
+                for s, r in raw.rows.items()
+            }
+            add_categorical("Histology", values)
+        elif key == COV_STAGE:
+            add_categorical("Stage", {s: stage_label(r["stage_raw"]) for s, r in raw.rows.items()})
+        elif key == COV_AGE:
+            add_numeric("Age At Diagnosis", {s: r["age"] for s, r in raw.rows.items()})
+        else:
+            label = _prettify_col(key)
+            raw_values = {s: row.get(key) for s, row in raw.covariate_table.items()}
+            present = [v for v in raw_values.values() if not _is_missing(v)]
+            n_numeric = sum(1 for v in present if _to_float(v) is not None)
+            if present and n_numeric >= max(1, round(0.9 * len(present))):
+                add_numeric(label, {s: _to_float(v) for s, v in raw_values.items()})
+            else:
+                add_categorical(
+                    label, {s: (None if _is_missing(v) else str(v).strip()) for s, v in raw_values.items()}
+                )
+
+    if not feature_rows:
+        return [], np.zeros((0, len(sample_ids)))
+    return names, np.vstack(feature_rows)

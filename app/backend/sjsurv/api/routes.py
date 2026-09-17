@@ -9,6 +9,8 @@ from fastapi import APIRouter, File, HTTPException, UploadFile
 from ..models import (
     ActivateSjdat,
     AgeBandsOut,
+    CovariateColumnOut,
+    CovariatesRequest,
     CVRequest,
     CVResponse,
     FeaturesRequest,
@@ -41,6 +43,7 @@ from ..services.metadata import (
     AgeBands,
     MetadataError,
     StratifyError,
+    build_covariates,
     parse_raw_metadata,
     quantile_age_bands,
     stratify,
@@ -160,6 +163,7 @@ def ingest_metadata(s, src: Path) -> MetadataLoaded:
     finally:
         src.unlink(missing_ok=True)
     s.raw_metadata = raw
+    s.selected_covariates = [c.key for c in raw.available_covariates() if c.default]
     _sync_sjdat_intersection(s)
 
     warnings: List[str] = []
@@ -318,6 +322,11 @@ def session_state(sid: str) -> SessionState:
         selected_group=s.selected_group,
         has_selection=s.selection is not None,
         has_model=s.model is not None,
+        covariate_columns=(
+            [CovariateColumnOut(**c.__dict__) for c in s.raw_metadata.available_covariates()]
+            if s.raw_metadata is not None else []
+        ),
+        selected_covariates=s.selected_covariates,
     )
 
 
@@ -360,6 +369,24 @@ def stratify_route(sid: str, body: StratifyRequest) -> MetadataLoaded:
         use_histology=body.use_histology, histology_map=body.histology_map,
     )
     return _metadata_loaded(s, [])
+
+
+@router.post("/session/{sid}/covariates", response_model=SessionState)
+def set_covariates(sid: str, body: CovariatesRequest) -> SessionState:
+    """Choose which sample aspects from the loaded metadata file ride along
+    as covariates at cross-validate/model time (see `build_covariates()`).
+    Doesn't touch the molecular feature selection itself — only the saved
+    MODEL, which would otherwise misreport what it was actually trained on."""
+    s = _session(sid)
+    if s.raw_metadata is None:
+        raise HTTPException(409, "load the sample metadata on the Data tab first")
+    valid = {c.key for c in s.raw_metadata.available_covariates()}
+    unknown = [k for k in body.columns if k not in valid]
+    if unknown:
+        raise HTTPException(422, f"unknown covariate column(s): {', '.join(unknown)}")
+    s.selected_covariates = list(dict.fromkeys(body.columns))
+    s.model = None
+    return session_state(sid)
 
 
 @router.post("/session/{sid}/sjdat", response_model=SessionState)
@@ -710,14 +737,25 @@ def select_geneset(sid: str, body: SelectGenesetRequest) -> SelectResponse:
     )
 
 
+def _covariates_for(s, sample_ids: List[str]):
+    if s.raw_metadata is None or not s.selected_covariates:
+        return [], None
+    return build_covariates(
+        s.raw_metadata, s.selected_covariates, sample_ids, histology_map=s.histology_map,
+    )
+
+
 @router.post("/session/{sid}/cross-validate", response_model=CVResponse)
 def cross_validate(sid: str, body: CVRequest) -> CVResponse:
     s = _session(sid)
     if s.selection is None or s.labels is None:
         raise HTTPException(409, "select features first")
     n_cv = body.n_cv or 5
+    cov_names, cov_values = _covariates_for(s, s.selection.sample_ids)
     try:
-        r = model_mod.cross_validate(s.selection, s.labels, int(n_cv))
+        r = model_mod.cross_validate(
+            s.selection, s.labels, int(n_cv), cov_names=cov_names, cov_values=cov_values,
+        )
     except model_mod.ModelError as e:
         raise HTTPException(422, str(e))
     return CVResponse(**r.__dict__)
@@ -728,10 +766,12 @@ def train_model(sid: str) -> ModelResponse:
     s = _session(sid)
     if s.selection is None or s.labels is None:
         raise HTTPException(409, "select features first")
+    cov_names, cov_values = _covariates_for(s, s.selection.sample_ids)
     try:
         m = model_mod.train_full(
             s.selection, s.labels,
             sjdat_kind=s.active_sjdat, group=s.selected_group or "",
+            cov_names=cov_names, cov_values=cov_values,
         )
     except model_mod.ModelError as e:
         raise HTTPException(422, str(e))

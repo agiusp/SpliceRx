@@ -8,12 +8,16 @@ from sjsurv.main import app
 from sjsurv.services.metadata import (
     ALL_GROUPS,
     CLASSIC_AGE_BANDS,
+    COV_AGE,
+    COV_HISTOLOGY,
+    COV_STAGE,
     DEFAULT_MIN_GROUP_N,
     NO_GROUP,
     AgeBands,
     MetadataError,
     StratifyError,
     bin_ages,
+    build_covariates,
     parse_raw_metadata,
     quantile_age_bands,
     stage_label,
@@ -411,7 +415,9 @@ def test_api_full_flow(client, sid):
     r = client.post(f"/api/session/{sid}/model")
     assert r.status_code == 200, r.text
     assert r.json()["saved"] is True
-    assert len(r.json()["features"]) == 25
+    # 25 molecular + the default covariates (Histology: 1 constant value,
+    # Stage: Early/Late, Age At Diagnosis: 1 numeric) = 25 + 1 + 2 + 1
+    assert len(r.json()["features"]) == 29
 
     st = client.get(f"/api/session/{sid}/state").json()
     assert st["has_model"] is True and st["active_sjdat"] == "gene_matrix"
@@ -573,7 +579,8 @@ def test_api_geneset_typed_flow_matches_mad_flow_shape(client, sid):
     r = client.post(f"/api/session/{sid}/model")
     assert r.status_code == 200, r.text
     assert r.json()["saved"] is True
-    assert len(r.json()["features"]) == 3
+    # 3 molecular + the same 4 default covariates as test_api_full_flow
+    assert len(r.json()["features"]) == 7
 
     st = client.get(f"/api/session/{sid}/state").json()
     assert st["has_model"] is True and st["has_geneset"] is True and st["has_features"] is True
@@ -669,3 +676,127 @@ def test_service_select_features_n_min_none_skips_coverage_filter():
     sel = select_features(sjdat, sample_ids, n_min=None, x_min=0, top_n=10)
     assert sel.n_candidates == sel.n_after_coverage == sjdat.n_features
     assert sel.n_features == 10
+
+
+# --------------------------------------------------------------------------- #
+# clinical covariates — Stage / Age At Diagnosis / Histology / MSI (when
+# present) alongside the selected molecular features
+# --------------------------------------------------------------------------- #
+def _metadata_with_msi_csv(tmp_path):
+    """Adds an MSI-status column (categorical) to the heterogeneous-histology
+    fixture, plus a free-text column that should be offered too, just not
+    checked by default."""
+    csv = tmp_path / "with_msi.csv"
+    rows = [
+        "sample_id,tcga.cgc_case_histological_diagnosis,tcga.cgc_case_pathologic_stage,"
+        "age_at_diagnosis_years,survival_days,msi_status,notes"
+    ]
+    hist = ["Adenocarcinoma Intestinal Type", "Adenocarcinoma Diffuse Type"]
+    msi = ["MSI-H", "MSS"]
+    for i in range(1, 21):
+        rows.append(
+            f"S{i:02d},{hist[i % 2]},Stage I,{40 + i},{900 + i},{msi[i % 2]},note{i}"
+        )
+    csv.write_text("\n".join(rows) + "\n")
+    return csv
+
+
+def test_available_covariates_defaults_and_kinds(tmp_path):
+    samples = [f"S{i:02d}" for i in range(1, 21)]
+    raw = parse_raw_metadata(_metadata_with_msi_csv(tmp_path), tmp_path, samples)
+    cols = {c.key: c for c in raw.available_covariates()}
+
+    assert cols[COV_HISTOLOGY].label == "Histology" and cols[COV_HISTOLOGY].default
+    assert cols[COV_STAGE].label == "Stage" and cols[COV_STAGE].default
+    assert cols[COV_AGE].label == "Age At Diagnosis" and cols[COV_AGE].kind == "numeric"
+    assert cols[COV_AGE].default
+
+    # the MSI column is offered *and* checked on by default, purely from its name
+    assert cols["msi_status"].kind == "categorical" and cols["msi_status"].default
+    assert cols["msi_status"].label == "Msi status"
+
+    # an unrelated free-text column is offered too, but not default-checked
+    assert "notes" in cols and cols["notes"].default is False
+
+    # survival_days (what SurviverGroup is split on) must never be offered —
+    # it would let the classifier "predict" the label for free
+    assert "survival_days" not in cols
+    assert "sample_id" not in cols
+
+
+def test_build_covariates_numeric_and_categorical_shapes(tmp_path):
+    samples = [f"S{i:02d}" for i in range(1, 21)]
+    raw = parse_raw_metadata(_metadata_with_msi_csv(tmp_path), tmp_path, samples)
+
+    names, values = build_covariates(raw, [COV_AGE, COV_STAGE, "msi_status"], samples)
+    assert values.shape[1] == len(samples)
+    assert "Age At Diagnosis" in names                    # one numeric row
+    assert sum(n.startswith("Stage=") for n in names) == 1  # Stage I -> Early only, one value
+    assert sum(n.startswith("Msi status=") for n in names) == 2   # MSI-H / MSS
+    age_row = values[names.index("Age At Diagnosis")]
+    assert np.allclose(sorted(age_row), sorted(41 + i for i in range(20)))
+
+
+def test_build_covariates_imputes_missing_numeric_with_the_sample_mean(tmp_path):
+    csv = tmp_path / "missing_age.csv"
+    csv.write_text(
+        "sample_id,tcga.cgc_case_histological_diagnosis,tcga.cgc_case_pathologic_stage,"
+        "age_at_diagnosis_years,survival_days\n"
+        "S01,Adenocarcinoma,Stage I,40,900\n"
+        "S02,Adenocarcinoma,Stage I,,1800\n"     # missing age
+        "S03,Adenocarcinoma,Stage I,60,300\n"
+    )
+    raw = parse_raw_metadata(csv, tmp_path, ["S01", "S02", "S03"])
+    names, values = build_covariates(raw, [COV_AGE], ["S01", "S02", "S03"])
+    assert values[0].tolist() == [40.0, 50.0, 60.0]      # S02 imputed to the mean of S01/S03
+
+
+def test_histology_covariate_reuses_the_applied_merge_map(tmp_path):
+    csv = _heterogeneous_histology_csv(tmp_path)
+    samples = [f"S{i:02d}" for i in range(1, 21)]
+    raw = parse_raw_metadata(csv, tmp_path, samples)
+    hmap = {
+        "Adenocarcinoma Intestinal Type": "Adenocarcinoma (merged)",
+        "Adenocarcinoma Diffuse Type": "Adenocarcinoma (merged)",
+    }
+    names, _ = build_covariates(raw, [COV_HISTOLOGY], samples, histology_map=hmap)
+    # 4 raw values, 2 merged together -> 3 distinct Histology= columns, not 4
+    assert sum(n.startswith("Histology=") for n in names) == 3
+    assert "Histology=Adenocarcinoma (merged)" in names
+
+
+def test_api_covariates_endpoint_changes_model_feature_count(client, sid):
+    _loaded_gene_session(client, sid)
+    suggested = client.post(f"/api/session/{sid}/age-bands/suggest", json={"n_bands": 1}).json()
+    client.post(f"/api/session/{sid}/stratify", json={
+        "edges": suggested["edges"], "include_lowest": suggested["include_lowest"],
+        "min_group_n": 10,
+    })
+
+    st = client.get(f"/api/session/{sid}/state").json()
+    default_keys = {c["key"] for c in st["covariate_columns"] if c["default"]}
+    assert default_keys == set(st["selected_covariates"])
+    assert {COV_HISTOLOGY, COV_STAGE, COV_AGE} <= default_keys
+
+    r = client.post(f"/api/session/{sid}/select",
+                     json={"group": "__all__", "n_min": 3, "x_min": 0, "top_n": 20})
+    assert r.status_code == 200, r.text
+    n_molecular = r.json()["n_selected"]
+
+    with_defaults = client.post(f"/api/session/{sid}/model").json()
+    assert with_defaults["n_features"] > n_molecular
+
+    r = client.post(f"/api/session/{sid}/covariates", json={"columns": []})
+    assert r.status_code == 200, r.text
+    assert r.json()["selected_covariates"] == []
+    none = client.post(f"/api/session/{sid}/model").json()
+    assert none["n_features"] == n_molecular == len(none["features"])
+
+    r = client.post(f"/api/session/{sid}/covariates", json={"columns": [COV_AGE]})
+    assert r.status_code == 200, r.text
+    just_age = client.post(f"/api/session/{sid}/model").json()
+    assert just_age["n_features"] == n_molecular + 1
+    assert any(f["feature"] == "Age At Diagnosis" for f in just_age["features"])
+
+    r = client.post(f"/api/session/{sid}/covariates", json={"columns": ["not-a-real-key"]})
+    assert r.status_code == 422

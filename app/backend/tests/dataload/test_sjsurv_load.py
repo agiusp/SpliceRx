@@ -66,4 +66,5 @@ def test_load_cohort_into_sjsurv_and_run(client, sjsurv_cohort):
 
     r = client.post(f"/api/sjsurv/session/{sid}/model")
     assert r.status_code == 200, r.text
-    assert len(r.json()["features"]) == 20
+    # 20 molecular + the default covariates (Histology, Stage Early/Late, Age At Diagnosis)
+    assert len(r.json()["features"]) == 24

@@ -16,7 +16,7 @@ an uneven Good/Poor split doesn't collapse to the majority class.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List
+from typing import Dict, List, Optional, Sequence
 
 import numpy as np
 from sklearn.linear_model import LogisticRegression
@@ -34,9 +34,11 @@ class ModelError(ValueError):
     pass
 
 
-def _xy(sel: Selection, labels: Dict[str, str]):
+def _xy(sel: Selection, labels: Dict[str, str], cov_values: Optional[np.ndarray]):
     y = np.array([1 if labels[s] == _POS else 0 for s in sel.sample_ids], dtype=int)
-    X = np.log1p(np.abs(sel.values.T))          # samples x features
+    X = np.log1p(np.abs(sel.values.T))          # samples x molecular features
+    if cov_values is not None and cov_values.size:
+        X = np.hstack([X, cov_values.T])        # covariates aren't count data — no log1p
     return X, y
 
 
@@ -76,18 +78,22 @@ class CVResult:
     messages: List[str]
 
 
-def cross_validate(sel: Selection, labels: Dict[str, str], n_splits: int) -> CVResult:
+def cross_validate(
+    sel: Selection, labels: Dict[str, str], n_splits: int,
+    *, cov_names: Sequence[str] = (), cov_values: Optional[np.ndarray] = None,
+) -> CVResult:
     if n_splits < 2:
         raise ModelError("ncv (cross-validation folds) must be >= 2")
-    X, y = _xy(sel, labels)
+    X, y = _xy(sel, labels, cov_values)
     _check(y, n_splits)
     n_good, n_poor = int(y.sum()), int((y == 0).sum())
 
+    cov_note = f" plus {len(cov_names)} clinical covariate(s)" if cov_names else ""
     msgs = [
         f"Building classification models to predict SurviverGroup on {len(y)} samples "
         f"(Good={n_good}, Poor={n_poor}).",
         f"{n_splits}-fold stratified cross-validation over {sel.n_features} selected "
-        f"{sel.feature_noun} feature(s).",
+        f"{sel.feature_noun} feature(s){cov_note}.",
     ]
 
     skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=0)
@@ -120,7 +126,7 @@ def cross_validate(sel: Selection, labels: Dict[str, str], n_splits: int) -> CVR
     )
 
     return CVResult(
-        n_samples=len(y), n_good=n_good, n_poor=n_poor, n_features=sel.n_features,
+        n_samples=len(y), n_good=n_good, n_poor=n_poor, n_features=sel.n_features + len(cov_names),
         n_splits=n_splits, auc=auc, fold_aucs=fold_aucs,
         fold_auc_mean=float(np.mean(fold_aucs)) if fold_aucs else float("nan"),
         fold_auc_sd=float(np.std(fold_aucs)) if fold_aucs else float("nan"),
@@ -163,8 +169,11 @@ class TrainedModel:
     _feature_ids: List[str] = None
 
 
-def train_full(sel: Selection, labels: Dict[str, str], *, sjdat_kind: str, group: str) -> TrainedModel:
-    X, y = _xy(sel, labels)
+def train_full(
+    sel: Selection, labels: Dict[str, str], *, sjdat_kind: str, group: str,
+    cov_names: Sequence[str] = (), cov_values: Optional[np.ndarray] = None,
+) -> TrainedModel:
+    X, y = _xy(sel, labels, cov_values)
     _check(y, 2)
     n_good, n_poor = int(y.sum()), int((y == 0).sum())
 
@@ -178,14 +187,16 @@ def train_full(sel: Selection, labels: Dict[str, str], *, sjdat_kind: str, group
 
     coef = clf.coef_.ravel()
     good_mask = y == 1
-    raw = sel.values                                   # features x samples (NaN->0 already)
+    has_cov = cov_values is not None and cov_values.size
+    raw = np.vstack([sel.values, cov_values]) if has_cov else sel.values   # features x samples
+    feature_ids = list(sel.feature_ids) + list(cov_names) if has_cov else list(sel.feature_ids)
     mean_good = raw[:, good_mask].mean(axis=1)
     mean_poor = raw[:, ~good_mask].mean(axis=1)
 
     order = np.argsort(np.abs(coef))[::-1]
     feats = [
         FeatureWeight(
-            feature=sel.feature_ids[i],
+            feature=feature_ids[i],
             weight=float(coef[i]),
             abs_weight=float(abs(coef[i])),
             direction="higher in Good" if coef[i] >= 0 else "higher in Poor",
@@ -197,12 +208,12 @@ def train_full(sel: Selection, labels: Dict[str, str], *, sjdat_kind: str, group
 
     return TrainedModel(
         sjdat_kind=sjdat_kind, group=group,
-        n_samples=len(y), n_good=n_good, n_poor=n_poor, n_features=sel.n_features,
+        n_samples=len(y), n_good=n_good, n_poor=n_poor, n_features=len(feature_ids),
         auc_resub=float(roc_auc_score(y, p)),
         accuracy_resub=float(accuracy_score(y, pred)),
         confusion_resub=[[tn, fp], [fn, tp]],
         features=feats,
         _coef=coef, _intercept=float(clf.intercept_[0]),
         _scaler_mean=scaler.mean_, _scaler_scale=scaler.scale_,
-        _feature_ids=list(sel.feature_ids),
+        _feature_ids=feature_ids,
     )

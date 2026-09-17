@@ -55,6 +55,18 @@ class MetadataLoaded(BaseModel):
     warnings: List[str] = []
 
 
+class CovariateColumnOut(BaseModel):
+    key: str              # "__histology__" | "__stage__" | "__age__", or a raw column name
+    label: str
+    kind: str              # "numeric" | "categorical"
+    n_available: int
+    default: bool
+
+
+class CovariatesRequest(BaseModel):
+    columns: List[str]     # covariate keys to use alongside the selected molecular features
+
+
 class SuggestAgeBandsRequest(BaseModel):
     n_bands: int = 3
 
@@ -111,6 +123,11 @@ class SessionState(BaseModel):
     selected_group: Optional[str] = None
     has_selection: bool = False
     has_model: bool = False
+    # clinical covariates (from the sample-metadata file) offered alongside
+    # the selected molecular features — see services/metadata.py's
+    # available_covariates()/build_covariates()
+    covariate_columns: List[CovariateColumnOut] = []
+    selected_covariates: List[str] = []
 
 
 class ActivateSjdat(BaseModel):

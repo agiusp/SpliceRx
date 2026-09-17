@@ -34,6 +34,9 @@ class Session:
     min_group_n: Optional[int] = None              # min_group_n currently applied
     use_histology: bool = True                     # whether Group includes Histology
     histology_map: Dict[str, str] = field(default_factory=dict)  # raw value -> merged label
+    selected_covariates: List[str] = field(default_factory=list)  # keys into
+    # services.metadata.RawMetadata.available_covariates(), used alongside
+    # the selected molecular features at cross-validate/model time
     sjdat_raw: Dict[str, Any] = field(default_factory=dict)  # kind -> pristine, as-loaded Sjdat
     sjdat: Dict[str, Any] = field(default_factory=dict)   # kind -> Sjdat, narrowed to samples
     # that also have a sample-metadata row (see _sync_sjdat_intersection); == sjdat_raw

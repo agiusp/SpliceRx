@@ -1,9 +1,11 @@
 import { useEffect, useState } from "react";
 import { dataloadApi, type PushGroupsResult } from "../dataload/api";
 import {
+  ALL_GROUPS,
   api,
   ApiError,
   type AgeBands,
+  type CovariateColumn,
   type CVResponse,
   type FeaturesResponse,
   type GroupCount,
@@ -68,7 +70,6 @@ export default function App({ sessionId, reloadNonce, sjvSessionId, sjvcSessionI
   // most Groups a cohort fragments into have nobody labelled (see the
   // heterogeneous-histology case below) — hide those by default
   const [showAllGroups, setShowAllGroups] = useState(false);
-  const [group, setGroup] = useState<string>("");
   const [warnings, setWarnings] = useState<string[]>([]);
   const [err, setErr] = useState<string | null>(null);
 
@@ -94,6 +95,18 @@ export default function App({ sessionId, reloadNonce, sjvSessionId, sjvcSessionI
   const [useHistology, setUseHistology] = useState(true);
   const [histologyCounts, setHistologyCounts] = useState<HistologyCount[]>([]);
   const [histologyMergeAs, setHistologyMergeAs] = useState<Record<string, string>>({});
+
+  // clinical covariates: sample aspects from the loaded metadata file added
+  // alongside the selected molecular features when cross-validating/training
+  // — defaults to Stage, Age At Diagnosis, Histology, and any MSI column
+  // present (see services/metadata.py's available_covariates())
+  const [covariateColumns, setCovariateColumns] = useState<CovariateColumn[]>([]);
+  const [selectedCovariates, setSelectedCovariates] = useState<string[]>([]);
+  const [covBusy, setCovBusy] = useState(false);
+  // the full list can run long (real cohort files carry dozens of columns) —
+  // collapsed by default, with a search box once expanded
+  const [covariatesExpanded, setCovariatesExpanded] = useState(false);
+  const [covariateSearch, setCovariateSearch] = useState("");
 
   // Feature selection: "Top by MAD" (nMin/xMin/topN, unchanged from before)
   // or one of the gene-set tabs (Type genes / Upload list / Pathway), whose
@@ -124,11 +137,12 @@ export default function App({ sessionId, reloadNonce, sjvSessionId, sjvcSessionI
         const bands = st.metadata?.age_bands;
         if (bands) seedBandEditor(bands, st.metadata?.min_group_n ?? CLASSIC_MIN_GROUP_N);
         if (st.metadata) seedHistologyEditor(st.metadata);
+        setCovariateColumns(st.covariate_columns);
+        setSelectedCovariates(st.selected_covariates);
         if (st.has_metadata) {
           const g = await api.groups(sid);
           setGroups(g.groups);
           setWarnings(g.warnings);
-          setGroup((cur) => cur || (g.groups.find((x) => x.n_labelled >= 8)?.group ?? g.groups[0]?.group ?? ""));
         }
       })
       .catch((e) => setErr(String(e)));
@@ -239,7 +253,6 @@ export default function App({ sessionId, reloadNonce, sjvSessionId, sjvcSessionI
       setAppliedLabels(md.age_bands?.labels ?? []);
       setAppliedMinGroupN(md.min_group_n ?? minGroupN);
       seedHistologyEditor(md);
-      setGroup("");
       clearDownstream();
       const g = await api.groups(sessionId);
       setGroups(g.groups);
@@ -273,7 +286,7 @@ export default function App({ sessionId, reloadNonce, sjvSessionId, sjvcSessionI
     const showCoverage = state?.active_sjdat === "junction_counts" || state?.active_sjdat === "rrs_scores";
     const r = await run("select", () =>
       api.select(sessionId, {
-        group, top_n: topN,
+        group: ALL_GROUPS, top_n: topN,
         n_min: showCoverage ? nMin : null, x_min: showCoverage ? xMin : null,
         protein_coding_only: codingOnly,
       }),
@@ -287,7 +300,7 @@ export default function App({ sessionId, reloadNonce, sjvSessionId, sjvcSessionI
   async function doSelectGeneset() {
     if (!sessionId) return;
     clearDownstream();
-    const r = await run("select", () => api.selectGeneset(sessionId, group));
+    const r = await run("select", () => api.selectGeneset(sessionId, ALL_GROUPS));
     if (r) {
       setSel(r);
       setWarnings(r.warnings);
@@ -309,22 +322,42 @@ export default function App({ sessionId, reloadNonce, sjvSessionId, sjvcSessionI
     }
   }
 
+  async function doToggleCovariate(key: string) {
+    if (!sessionId) return;
+    const next = selectedCovariates.includes(key)
+      ? selectedCovariates.filter((k) => k !== key)
+      : [...selectedCovariates, key];
+    setCovBusy(true);
+    setErr(null);
+    try {
+      const st = await api.setCovariates(sessionId, next);
+      setSelectedCovariates(st.selected_covariates);
+      setCv(null);
+      setModel(null);
+    } catch (e) {
+      setErr(e instanceof ApiError ? e.message : String(e));
+    } finally {
+      setCovBusy(false);
+    }
+  }
+
   const opts = state?.sjdat_options ?? [];
   const activeOpt = opts.find((o) => o.kind === state?.active_sjdat && o.loaded);
   const anyLoaded = opts.some((o) => o.loaded);
   const metaReady = !!state?.has_metadata;
-  const groupChosen = !!group;
+  const allGroup = groups.find((g) => g.group === ALL_GROUPS);
+  const groupChosen = !!allGroup && allGroup.n_labelled > 0;
   const selectReady = metaReady && groupChosen && !!activeOpt;
-  const chosenGroup = groups.find((g) => g.group === group);
 
   return (
     <div className="app">
       <h1>SJSurv — Splice-junction survivor groups</h1>
       <p className="sub">
         Does a cohort's splice-junction signal separate <b>Good</b> from <b>Poor</b> survivors?
-        SJSurv stratifies the cohort right here — by histology, pathologic stage and an age
-        band you control — and labels each stratum's samples Good/Poor by their own survival
-        against their stratum's median. Pick a group and a feature matrix, select features, then
+        SJSurv stratifies the cohort right here — by histology, pathologic stage and an age band
+        you control — and labels each stratum's samples Good/Poor by their own survival against
+        their stratum's median. The classifier itself always trains on every Good/Poor-labelled
+        sample: pick a feature matrix, select molecular features and clinical covariates, then
         cross-validate a classifier of the survivor label.
       </p>
 
@@ -393,12 +426,21 @@ export default function App({ sessionId, reloadNonce, sjvSessionId, sjvcSessionI
       </Panel>
 
       {/* 2 · Group & age-band stratification --------------------------- */}
-      <Panel n={2} title="Group & age-band stratification" done={groupChosen} disabled={!metaReady}>
+      <Panel
+        n={2}
+        title="Group and Age-Band Stratification for Good/Poor survivor labels"
+        done={groupChosen}
+        disabled={!metaReady}
+      >
         <p className="muted" style={{ marginTop: 0, fontSize: 13 }}>
           Each sample's <code>Group</code> is {useHistology ? "Histology | " : ""}Stage | age band;
           within a <code>Group</code> with at least <b>{appliedMinGroupN}</b> samples, a sample is
           labelled <b>Good</b> if its survival is at or above that group's median, <b>Poor</b>{" "}
           otherwise. Currently stratifying by age into: <b>{appliedLabels.join(", ") || "…"}</b>.
+          Adjust the age bands and histology grouping below to try to grow the number of Good/Poor
+          labels — but every classifier downstream always trains on <b>every</b> labelled sample
+          (the "{groups[0]?.label ?? "All labelled samples"}" row below), regardless of which
+          stratification Group a sample falls into.
         </p>
         {(() => {
           // the aggregate "All labelled samples" row is always first (see
@@ -415,7 +457,6 @@ export default function App({ sessionId, reloadNonce, sjvSessionId, sjvcSessionI
                 <table className="grid">
                   <thead>
                     <tr>
-                      <th style={{ width: 28 }} />
                       <th>Group</th>
                       <th className="num">Samples</th>
                       <th className="num">Good</th>
@@ -425,25 +466,7 @@ export default function App({ sessionId, reloadNonce, sjvSessionId, sjvcSessionI
                   </thead>
                   <tbody>
                     {visibleGroups.map((g) => (
-                      <tr
-                        key={g.group}
-                        className={g.group === group ? "sel" : ""}
-                        style={{ cursor: "pointer" }}
-                        onClick={() => {
-                          setGroup(g.group);
-                          clearDownstream();
-                        }}
-                      >
-                        <td>
-                          <input
-                            type="radio"
-                            checked={g.group === group}
-                            onChange={() => {
-                              setGroup(g.group);
-                              clearDownstream();
-                            }}
-                          />
-                        </td>
+                      <tr key={g.group} className={g.group === ALL_GROUPS ? "sel" : ""}>
                         <td>{g.label}</td>
                         <td className="num">{g.n_total}</td>
                         <td className="num">{g.n_good}</td>
@@ -469,10 +492,10 @@ export default function App({ sessionId, reloadNonce, sjvSessionId, sjvcSessionI
             </>
           );
         })()}
-        {chosenGroup && chosenGroup.n_labelled > 0 && chosenGroup.n_labelled < 12 && (
+        {allGroup && allGroup.n_labelled > 0 && allGroup.n_labelled < 12 && (
           <div className="warn">
-            Only {chosenGroup.n_labelled} labelled sample(s) in this group — the classifier will be
-            unstable. Prefer a larger group, "all labelled samples", or coarser age bands below.
+            Only {allGroup.n_labelled} labelled sample(s) total — the classifier will be unstable.
+            Try coarser age bands, a lower per-group minimum, or dropping/merging histology below.
           </div>
         )}
         {groups.length > 0 && groups[0].n_labelled === 0 && (
@@ -712,6 +735,92 @@ export default function App({ sessionId, reloadNonce, sjvSessionId, sjvcSessionI
 
       {/* 4 · Feature selection --------------------------------------- */}
       <Panel n={4} title="Feature selection" done={!!sel} disabled={!selectReady}>
+        <div style={{ marginBottom: 14, paddingBottom: 12, borderBottom: "1px solid var(--border)" }}>
+          <p className="muted" style={{ marginTop: 0, fontSize: 13 }}>
+            Clinical covariates — sample aspects from the loaded metadata file, added to the
+            classifier alongside the molecular features selected below. Stage, Age At Diagnosis,
+            Histology, and any MSI column are on by default; toggle any others the file has.
+          </p>
+          <div className="row" style={{ alignItems: "center" }}>
+            <button
+              type="button"
+              className="ghost"
+              onClick={() => setCovariatesExpanded((v) => !v)}
+              disabled={covariateColumns.length === 0}
+            >
+              {covariatesExpanded
+                ? "Hide covariate list"
+                : `Edit covariates (${covariateColumns.length} available)`}
+            </button>
+            <span className="muted" style={{ fontSize: 13 }}>
+              {covariateColumns.length === 0
+                ? "no covariate columns available"
+                : selectedCovariates.length > 0
+                  ? `${selectedCovariates.length} selected: ${covariateColumns
+                      .filter((c) => selectedCovariates.includes(c.key))
+                      .map((c) => c.label)
+                      .join(", ")}`
+                  : "none selected"}
+            </span>
+          </div>
+          {covariatesExpanded && covariateColumns.length > 0 && (
+            <>
+              <label style={{ display: "block", maxWidth: 320, marginTop: 10 }}>
+                Search
+                <input
+                  type="text"
+                  placeholder="filter covariates by name…"
+                  value={covariateSearch}
+                  onChange={(e) => setCovariateSearch(e.target.value)}
+                />
+              </label>
+              {(() => {
+                const q = covariateSearch.trim().toLowerCase();
+                const filtered = q
+                  ? covariateColumns.filter((c) => c.label.toLowerCase().includes(q))
+                  : covariateColumns;
+                return (
+                  <div className="scroll-x" style={{ marginTop: 8 }}>
+                    <table className="grid">
+                      <thead>
+                        <tr>
+                          <th style={{ width: 28 }} />
+                          <th>Covariate</th>
+                          <th>Type</th>
+                          <th className="num">Available</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {filtered.map((c) => (
+                          <tr key={c.key}>
+                            <td>
+                              <input
+                                type="checkbox"
+                                checked={selectedCovariates.includes(c.key)}
+                                disabled={covBusy}
+                                onChange={() => doToggleCovariate(c.key)}
+                              />
+                            </td>
+                            <td>{c.label}</td>
+                            <td className="muted">{c.kind}</td>
+                            <td className="num">{c.n_available}</td>
+                          </tr>
+                        ))}
+                        {filtered.length === 0 && (
+                          <tr>
+                            <td colSpan={4} className="muted">
+                              no covariate matches "{covariateSearch}"
+                            </td>
+                          </tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                );
+              })()}
+            </>
+          )}
+        </div>
         {sessionId && (
           <GeneSetPanel
             sessionId={sessionId}
@@ -763,6 +872,9 @@ export default function App({ sessionId, reloadNonce, sjvSessionId, sjvcSessionI
               ) : (
                 "."
               )}
+              {selectedCovariates.length > 0 && (
+                <> Plus {selectedCovariates.length} clinical covariate(s) below.</>
+              )}
             </div>
             <div>
               {sel.n_group_samples} samples — Good {sel.n_good}, Poor {sel.n_poor}.
@@ -801,7 +913,12 @@ export default function App({ sessionId, reloadNonce, sjvSessionId, sjvcSessionI
           </button>
           {sel && (
             <span className="muted">
-              predicting SurviverGroup on {sel.n_group_samples} samples, {sel.n_selected} features
+              predicting SurviverGroup on {sel.n_group_samples} samples, {sel.n_selected} molecular
+              feature(s)
+              {selectedCovariates.length > 0
+                ? ` plus ${selectedCovariates.length} clinical covariate(s) (a categorical one can `
+                  + `contribute more than one model feature)`
+                : ""}
             </span>
           )}
         </div>
